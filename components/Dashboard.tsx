@@ -26,29 +26,6 @@ interface Props {
 
 type ChartMode = 'pct' | 'value';
 
-function SetupBanner({ contestConfig }: { contestConfig: ContestConfig }) {
-  return (
-    <div className="main-content" style={{ paddingTop: 32 }}>
-      <div className="setup-banner">
-        <h2>⏳ Waiting for official purchase prices</h2>
-        <p>
-          The contest configuration is ready, but the official starting prices have not been
-          entered yet. Once you capture the prices at the official purchase timestamp
-          and fill them into <code>contest.config.json</code>, live performance will appear here.
-        </p>
-        <p style={{ marginTop: 8 }}>
-          See the README for exact instructions, or run{' '}
-          <code>node scripts/capture-start-prices.mjs</code> on the purchase date.
-        </p>
-      </div>
-
-      <PurchaseRecord contestConfig={contestConfig} />
-      <SharedPicks portfolios={PORTFOLIOS} />
-      <Methodology />
-      <Disclaimer />
-    </div>
-  );
-}
 
 export function Dashboard({ contestConfig }: Props) {
   const configured = useMemo(() => isContestConfigured(contestConfig), [contestConfig]);
@@ -153,6 +130,18 @@ export function Dashboard({ contestConfig }: Props) {
     return series;
   }, [configured, historyResponse, prices, contestConfig]);
 
+  // Baseline series: single point at contest start, all series at 0% / $10,000.
+  // Used as a fallback when real history data hasn't loaded yet.
+  const startDateStr = useMemo(
+    () => new Date(contestConfig.officialPurchaseTimestamp).toISOString().split('T')[0],
+    [contestConfig.officialPurchaseTimestamp],
+  );
+  const baselineSeries = useMemo<HistoryPoint[]>(
+    () => [{ date: startDateStr, chatgpt: 0, claude: 0, gemini: 0, spy: 0 }],
+    [startDateStr],
+  );
+  const displaySeries = historySeries ?? baselineSeries;
+
   if (!configured) {
     return (
       <>
@@ -163,7 +152,28 @@ export function Dashboard({ contestConfig }: Props) {
           isLoading={false}
           onRefresh={() => {}}
         />
-        <SetupBanner contestConfig={contestConfig} />
+        <div className="main-content" style={{ paddingTop: 32 }}>
+          <PerformanceChart
+            series={baselineSeries}
+            mode={chartMode}
+            onModeChange={setChartMode}
+            isLoading={false}
+            pricesPending={true}
+          />
+          <div className="setup-banner">
+            <h2>⏳ Waiting for official purchase prices</h2>
+            <p>
+              All 15 positions are locked and ready. Official starting prices have not been
+              entered yet — run{' '}
+              <code>node scripts/capture-start-prices.mjs</code> with your API key, or fill in
+              prices manually in <code>contest.config.json</code>.
+            </p>
+          </div>
+          <PurchaseRecord contestConfig={contestConfig} />
+          <SharedPicks portfolios={PORTFOLIOS} />
+          <Methodology />
+          <Disclaimer />
+        </div>
       </>
     );
   }
@@ -193,7 +203,7 @@ export function Dashboard({ contestConfig }: Props) {
         />
 
         <PerformanceChart
-          series={historySeries}
+          series={displaySeries}
           mode={chartMode}
           onModeChange={setChartMode}
           isLoading={isLoading && !historySeries}

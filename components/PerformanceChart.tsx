@@ -31,6 +31,8 @@ interface Props {
   mode: ChartMode;
   onModeChange: (m: ChartMode) => void;
   isLoading: boolean;
+  /** When true, prices are still pending; chart shows only the starting baseline. */
+  pricesPending?: boolean;
 }
 
 function toValue(pct: number | null): number | null {
@@ -38,7 +40,7 @@ function toValue(pct: number | null): number | null {
   return 10000 * (1 + pct / 100);
 }
 
-export function PerformanceChart({ series, mode, onModeChange, isLoading }: Props) {
+export function PerformanceChart({ series, mode, onModeChange, isLoading, pricesPending }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chartRef = useRef<Chart | null>(null);
 
@@ -83,10 +85,11 @@ export function PerformanceChart({ series, mode, onModeChange, isLoading }: Prop
       };
     }
 
-    // Zero reference line
+    // Baseline reference line — 0% in return mode, $10,000 in value mode
+    const baselineRef = mode === 'pct' ? 0 : 10000;
     const zeroLine = {
       label: '',
-      data: series.map(() => 0),
+      data: series.map(() => baselineRef),
       borderColor: 'rgba(255,255,255,0.08)',
       borderWidth: 1,
       pointRadius: 0,
@@ -244,9 +247,28 @@ export function PerformanceChart({ series, mode, onModeChange, isLoading }: Prop
         <canvas ref={canvasRef} id="perf-chart" aria-label="Performance chart" role="img" />
       </div>
 
+      {pricesPending && (
+        <div style={{
+          marginTop: 10,
+          padding: '8px 14px',
+          borderRadius: 7,
+          background: 'var(--surface2)',
+          border: '1px solid var(--border)',
+          fontSize: '0.72rem',
+          color: 'var(--muted)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          <span style={{ color: 'var(--muted-mid)' }}>⏳</span>
+          Official starting prices are being initialized. Chart shows the starting baseline only —
+          returns will populate once prices are recorded in <code>contest.config.json</code>.
+        </div>
+      )}
+
       <div className="benchmark-note">
         <div style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: 'var(--spy)', marginRight: 6 }} />
-        S&amp;P 500 benchmark — tracked using SPY &nbsp;|&nbsp; All series normalized to 0% at official purchase date
+        S&amp;P 500 benchmark — tracked using SPY &nbsp;|&nbsp; All series start at {mode === 'pct' ? '0.00%' : '$10,000'} at official purchase date
       </div>
     </div>
   );
