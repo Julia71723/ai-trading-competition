@@ -2,11 +2,10 @@
 /**
  * capture-start-prices.mjs
  *
- * Captures official starting prices for all contest symbols using the methodology
- * defined in contest.config.json's officialPurchaseTimestamp (2026-07-24T16:00:00-04:00):
+ * Captures official starting prices for all contest symbols:
  *
  *   US stocks and SPY: official regular-session closing price on July 24, 2026.
- *   Crypto (BTC/USD, ETH/USD, SOL/USD): price at or nearest to 4:00 PM ET on July 24, 2026.
+ *   Crypto (BTC/USD, ETH/USD, SOL/USD): price at or nearest to 4:00 PM ET (20:00 UTC).
  *
  * Usage:
  *   node scripts/capture-start-prices.mjs            # skip already-set prices
@@ -28,6 +27,8 @@ const TIMEOUT_MS = 15_000;
 
 const CRYPTO_SYMBOLS = new Set(['BTC/USD', 'ETH/USD', 'SOL/USD']);
 
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
 function loadConfig() {
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
 }
@@ -37,7 +38,7 @@ function saveConfig(config) {
 }
 
 function encodeSymbol(sym) {
-  return sym.replace(/\//g, '%2F');
+  return encodeURIComponent(sym);
 }
 
 async function fetchWithTimeout(url) {
@@ -46,16 +47,38 @@ async function fetchWithTimeout(url) {
   try {
     const res = await fetch(url, { signal: controller.signal });
     return res;
+  } catch (err) {
+    throw new Error(`Network error: ${err.message}`);
   } finally {
     clearTimeout(id);
   }
 }
 
 /**
- * For a given ET calendar date, return the UTC milliseconds that represent 4:00 PM ET.
- * Accounts for EDT (UTC-4, summer) vs EST (UTC-5, winter).
+ * Build a guaranteed YYYY-MM-DD string from a Date in America/New_York.
+ * Uses formatToParts so the result never depends on locale separator conventions.
+ */
+function toETDateStr(date) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = dtf.formatToParts(date);
+  const y = parts.find((p) => p.type === 'year').value;
+  const m = parts.find((p) => p.type === 'month').value;
+  const d = parts.find((p) => p.type === 'day').value;
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * For a given ET calendar date string (YYYY-MM-DD), return the UTC ms
+ * that represent 4:00 PM ET, accounting for EDT (UTC-4) vs EST (UTC-5).
+ * July is always EDT, so 4 PM ET = 20:00 UTC.
  */
 function get4PMETUtcMs(etDateStr) {
+  // Probe at 20:00 UTC — if that is 16:xx ET we are in EDT
   const at20utc = new Date(`${etDateStr}T20:00:00Z`);
   const etHour = parseInt(
     new Intl.DateTimeFormat('en-US', {
@@ -65,44 +88,100 @@ function get4PMETUtcMs(etDateStr) {
     }).format(at20utc),
     10,
   );
+  // EDT: 20:00 UTC = 16:00 ET ✓   EST: 21:00 UTC = 16:00 ET
   return etHour === 16 ? at20utc.getTime() : new Date(`${etDateStr}T21:00:00Z`).getTime();
 }
 
+// ── Twelve Data helpers ───────────────────────────────────────────────────────
+
 /**
- * Fetch the official regular-session daily closing price for a US stock/ETF.
- * Uses the 1day bar on the official date from Twelve Data.
- * Returns { price, actualDatetime } or null if unavailable or wrong date.
+ * Log a Twelve Data error body without revealing the API key.
+ * The key is never included in any printed string.
+ */
+function logApiError(symbol, statusCode, body) {
+  const code = body?.code ?? '—';
+  const msg = body?.message ?? '(no message)';
+  const status = body?.status ?? '—';
+  console.error(
+    `         ⛔  Twelve Data error for ${symbol}: ` +
+    `HTTP ${statusCode} | status="${status}" code=${code} | ${msg}`,
+  );
+}
+
+/**
+ * Fetch a JSON response from Twelve Data, with unified error handling.
+ * Returns { ok, status, body } — never throws on HTTP errors.
+ * Throws on network failure.
+ */
+async function tdFetch(url) {
+  const res = await fetchWithTimeout(url);
+  const body = await res.json().catch(() => null);
+  return { ok: res.ok, status: res.status, body };
+}
+
+// ── Stock fetch ───────────────────────────────────────────────────────────────
+
+/**
+ * Fetch the official regular-session closing price for a US stock/ETF on dateStr.
+ *
+ * Uses interval=1day, start_date=dateStr, end_date=<next calendar day>.
+ * end_date must be strictly after start_date; Twelve Data returns an empty
+ * range when start_date === end_date.
  */
 async function fetchStockDailyClose(symbol, dateStr, apiKey) {
+  // end_date is the next calendar day so the range is unambiguous
+  const endDate = nextDay(dateStr);
+
   const url =
     `https://api.twelvedata.com/time_series` +
-    `?symbol=${encodeSymbol(symbol)}&interval=1day` +
-    `&start_date=${dateStr}&end_date=${dateStr}` +
-    `&outputsize=1&apikey=${apiKey}`;
+    `?symbol=${encodeSymbol(symbol)}` +
+    `&interval=1day` +
+    `&start_date=${dateStr}` +
+    `&end_date=${endDate}` +
+    `&outputsize=2` +
+    `&apikey=${apiKey}`;
 
-  let res;
+  let result;
   try {
-    res = await fetchWithTimeout(url);
-  } catch {
+    result = await tdFetch(url);
+  } catch (err) {
+    console.error(`         ⛔  Network failure for ${symbol}: ${err.message}`);
     return null;
   }
-  if (!res.ok) return null;
 
-  const data = await res.json();
-  if (data.status === 'error' || !data.values?.length) return null;
+  const { ok, status, body } = result;
 
-  const bar = data.values[0];
-  // The datetime for a daily bar is just the date string "YYYY-MM-DD"
-  if (!bar.datetime.startsWith(dateStr)) {
-    console.warn(
-      `      ⚠️  ${symbol}: returned date "${bar.datetime}" does not match requested "${dateStr}".` +
-      ` This may mean the market was closed. Refusing to use.`,
+  if (!ok || body?.status === 'error') {
+    logApiError(symbol, status, body);
+    return null;
+  }
+
+  const values = body?.values;
+  if (!Array.isArray(values) || values.length === 0) {
+    console.error(
+      `         ⛔  No bars returned for ${symbol} ` +
+      `(start_date=${dateStr}, end_date=${endDate}). ` +
+      `The market may have been closed or the symbol is not on your plan.`,
+    );
+    return null;
+  }
+
+  // Twelve Data returns bars newest-first; find the one for dateStr
+  const bar = values.find((v) => String(v.datetime).startsWith(dateStr));
+  if (!bar) {
+    const returned = values.map((v) => v.datetime).join(', ');
+    console.error(
+      `         ⛔  No bar for ${dateStr} in response for ${symbol}. ` +
+      `Bars returned: [${returned}]`,
     );
     return null;
   }
 
   const price = parseFloat(bar.close);
-  if (!isFinite(price) || price <= 0) return null;
+  if (!isFinite(price) || price <= 0) {
+    console.error(`         ⛔  Non-finite close price for ${symbol}: "${bar.close}"`);
+    return null;
+  }
 
   return {
     price,
@@ -111,93 +190,128 @@ async function fetchStockDailyClose(symbol, dateStr, apiKey) {
   };
 }
 
+// ── Crypto fetch ──────────────────────────────────────────────────────────────
+
 /**
- * Fetch the crypto price at or nearest to 4:00 PM ET on the official date.
- * Uses 1-minute bars around the target UTC timestamp.
- * Returns { price, actualDatetime, diffMinutes } or null if unavailable or out of tolerance.
+ * Fetch the crypto price at or nearest to 4:00 PM ET on dateStr.
+ * July 24, 2026 is in EDT, so the target is 20:00:00 UTC.
+ *
+ * Fetches a 20-minute window of 1-min bars centered on 20:00 UTC.
+ * The start_date MUST include seconds ("YYYY-MM-DD HH:MM:SS"); Twelve Data
+ * rejects "HH:MM" for intraday intervals.
  */
 async function fetchCryptoAt4PMET(symbol, dateStr, apiKey) {
-  // 4 PM ET on official date = 20:00 UTC (EDT in July)
   const targetUTCMs = get4PMETUtcMs(dateStr);
   const targetUTC = new Date(targetUTCMs);
 
-  // Fetch 20 minutes of 1-min bars centered on the target
+  // Window: 10 minutes before the target
   const windowStart = new Date(targetUTCMs - 10 * 60 * 1000);
-  const windowStartStr = windowStart.toISOString().replace('T', ' ').slice(0, 16);
+  // MUST be YYYY-MM-DD HH:MM:SS — slice(0,19) drops milliseconds and the Z
+  const windowStartStr = windowStart.toISOString().replace('T', ' ').slice(0, 19);
 
   const url =
     `https://api.twelvedata.com/time_series` +
-    `?symbol=${encodeSymbol(symbol)}&interval=1min` +
-    `&start_date=${encodeURIComponent(windowStartStr)}&outputsize=25` +
+    `?symbol=${encodeSymbol(symbol)}` +
+    `&interval=1min` +
+    `&start_date=${encodeURIComponent(windowStartStr)}` +
+    `&outputsize=25` +
     `&apikey=${apiKey}`;
 
-  let res;
+  let result;
   try {
-    res = await fetchWithTimeout(url);
-  } catch {
+    result = await tdFetch(url);
+  } catch (err) {
+    console.error(`         ⛔  Network failure for ${symbol}: ${err.message}`);
     return null;
   }
-  if (!res.ok) return null;
 
-  const data = await res.json();
-  if (data.status === 'error' || !data.values?.length) return null;
+  const { ok, status, body } = result;
 
-  // Find bar closest to the target UTC time
+  if (!ok || body?.status === 'error') {
+    logApiError(symbol, status, body);
+    return null;
+  }
+
+  const values = body?.values;
+  if (!Array.isArray(values) || values.length === 0) {
+    console.error(
+      `         ⛔  No bars returned for ${symbol} ` +
+      `(window start: ${windowStartStr} UTC, target: ${targetUTC.toISOString()}). ` +
+      `Minute-level history may not be available on your plan.`,
+    );
+    return null;
+  }
+
+  // Twelve Data crypto datetimes are in UTC
   let best = null;
   let bestDiff = Infinity;
 
-  for (const bar of data.values) {
-    // Crypto datetimes from Twelve Data are in UTC
-    const barUTCMs = new Date(bar.datetime.replace(' ', 'T') + 'Z').getTime();
-    const diff = Math.abs(barUTCMs - targetUTCMs) / 60000; // minutes
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = { bar, diffMinutes: diff };
+  for (const bar of values) {
+    // Append 'Z' to treat the datetime as UTC
+    const barMs = new Date(bar.datetime.replace(' ', 'T') + 'Z').getTime();
+    const diffMs = Math.abs(barMs - targetUTCMs);
+    if (diffMs < bestDiff) {
+      bestDiff = diffMs;
+      best = { bar, diffMs };
     }
   }
 
-  if (!best || best.diffMinutes > 5) {
+  const bestDiffMin = bestDiff / 60000;
+
+  if (!best || bestDiffMin > 5) {
     if (best) {
-      console.warn(
-        `      ⚠️  ${symbol}: closest bar at ${best.bar.datetime} UTC is ` +
-        `${best.diffMinutes.toFixed(1)} min from target — exceeds 5-min tolerance. Refusing to use.`,
+      console.error(
+        `         ⛔  ${symbol}: closest bar is "${best.bar.datetime}" UTC ` +
+        `(${bestDiffMin.toFixed(1)} min from target ${targetUTC.toISOString()}). ` +
+        `Exceeds 5-minute tolerance — refusing to use.`,
       );
     }
     return null;
   }
 
   const price = parseFloat(best.bar.close);
-  if (!isFinite(price) || price <= 0) return null;
+  if (!isFinite(price) || price <= 0) {
+    console.error(`         ⛔  Non-finite close price for ${symbol}: "${best.bar.close}"`);
+    return null;
+  }
 
-  // Verify the bar date is on the right calendar day (ET)
-  const barUTCMs = new Date(best.bar.datetime.replace(' ', 'T') + 'Z').getTime();
-  const barETDate = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date(barUTCMs));
-
+  // Verify the bar falls on the correct ET calendar date
+  const barETDate = toETDateStr(new Date(new Date(best.bar.datetime.replace(' ', 'T') + 'Z').getTime()));
   if (barETDate !== dateStr) {
-    console.warn(
-      `      ⚠️  ${symbol}: bar at ${best.bar.datetime} UTC is calendar date ` +
-      `"${barETDate}" ET, not "${dateStr}". Refusing to use — wrong date.`,
+    console.error(
+      `         ⛔  ${symbol}: bar "${best.bar.datetime}" UTC is ET date "${barETDate}", ` +
+      `not "${dateStr}". Wrong date — refusing to use.`,
     );
     return null;
   }
 
   return {
     price,
-    actualDatetime: `${best.bar.datetime} UTC (nearest 1-min bar to ${targetUTC.toISOString()}, ${best.diffMinutes.toFixed(1)} min diff)`,
+    actualDatetime:
+      `${best.bar.datetime} UTC ` +
+      `(target: ${targetUTC.toISOString()}, diff: ${bestDiffMin.toFixed(1)} min)`,
     source: '1min bar (nearest 4 PM ET)',
-    diffMinutes: best.diffMinutes,
+    diffMinutes: bestDiffMin,
   };
 }
+
+// ── Date utils ────────────────────────────────────────────────────────────────
+
+/** Return the calendar day after dateStr (YYYY-MM-DD). */
+function nextDay(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00Z'); // noon UTC avoids DST edge cases
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().split('T')[0];
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   const apiKey = process.env.TWELVE_DATA_API_KEY;
   if (!apiKey) {
     console.error(
       '\n❌  TWELVE_DATA_API_KEY is not set.\n' +
-      '   Export it before running this script:\n' +
+      '   Export it before running:\n' +
       '     export TWELVE_DATA_API_KEY=your_key_here\n',
     );
     process.exit(1);
@@ -206,28 +320,27 @@ async function main() {
   const config = loadConfig();
   const { officialPurchaseTimestamp, startPrices } = config;
 
-  // Derive the official date string (YYYY-MM-DD) in ET
   const officialUTC = new Date(officialPurchaseTimestamp);
-  const officialDateET = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(officialUTC);
+  const officialDateET = toETDateStr(officialUTC);  // "2026-07-24"
 
-  console.log(`\n📅  Official purchase timestamp: ${officialPurchaseTimestamp}`);
-  console.log(`📅  Official date (ET):          ${officialDateET}`);
-  console.log(`🔑  API key: ${apiKey.slice(0, 6)}...`);
-  console.log(`📄  Config:  ${CONFIG_PATH}\n`);
+  // Verify the timezone conversion is correct before fetching anything
+  const targetUTCMs = get4PMETUtcMs(officialDateET);
+  const targetUTCStr = new Date(targetUTCMs).toISOString(); // should be "...T20:00:00.000Z"
+
+  console.log(`\n📅  Official purchase timestamp : ${officialPurchaseTimestamp}`);
+  console.log(`📅  Official date (ET)           : ${officialDateET}`);
+  console.log(`🕓  4:00 PM ET in UTC             : ${targetUTCStr}`);
+  console.log(`🔑  API key                       : ${apiKey.slice(0, 6)}...`);
+  console.log(`📄  Config                        : ${CONFIG_PATH}\n`);
   console.log('📋  Methodology:');
-  console.log('    • US stocks & SPY → official regular-session daily close (4:00 PM ET)');
-  console.log('    • Crypto (BTC/USD, ETH/USD, SOL/USD) → price at or nearest 4:00 PM ET (1-min bar)\n');
+  console.log('    • Stocks / SPY  → 1day bar, official regular-session close');
+  console.log('    • Crypto        → 1min bars, nearest bar to 4:00 PM ET (20:00 UTC)\n');
 
-  if (DRY_RUN) console.log('ℹ️   Dry-run mode — nothing will be written.\n');
-  if (FORCE) console.log('⚠️   Force mode — will overwrite existing prices.\n');
+  if (DRY_RUN) console.log('ℹ️   Dry-run — nothing will be written.\n');
+  if (FORCE)   console.log('⚠️   Force — existing prices will be overwritten.\n');
 
   const symbols = Object.keys(startPrices);
-  const toFetch = FORCE
-    ? symbols
-    : symbols.filter((s) => startPrices[s] === null);
+  const toFetch = FORCE ? symbols : symbols.filter((s) => startPrices[s] === null);
 
   if (toFetch.length === 0) {
     console.log('✅  All starting prices are already set. Use --force to re-fetch.\n');
@@ -241,58 +354,55 @@ async function main() {
   const metaResults = {};
   const failed = [];
 
-  // ── Stocks: official daily close ──────────────────────────────────────────
+  // ── 1. Stocks ────────────────────────────────────────────────────────────────
   if (stocksToFetch.length > 0) {
-    console.log(`📈  Fetching daily closes for ${stocksToFetch.length} stock/ETF symbol(s):\n`);
+    console.log(`📈  Stocks / SPY (${stocksToFetch.length} symbol${stocksToFetch.length > 1 ? 's' : ''}):\n`);
 
     for (const symbol of stocksToFetch) {
-      process.stdout.write(`   ${symbol.padEnd(12)} ...`);
-      const result = await fetchStockDailyClose(symbol, officialDateET, apiKey);
+      process.stdout.write(`   ${symbol.padEnd(12)} `);
+      const r = await fetchStockDailyClose(symbol, officialDateET, apiKey);
 
-      if (result) {
-        process.stdout.write(` ✓  $${result.price}  (${result.actualDatetime})\n`);
-        results[symbol] = result.price;
-        metaResults[symbol] = { actualDatetime: result.actualDatetime, source: result.source };
+      if (r) {
+        process.stdout.write(`✓  $${r.price}  (${r.actualDatetime})\n`);
+        results[symbol] = r.price;
+        metaResults[symbol] = { actualDatetime: r.actualDatetime, source: r.source };
       } else {
-        process.stdout.write(` ✗  unavailable\n`);
+        process.stdout.write(`✗  failed — see error above\n`);
         failed.push(symbol);
       }
 
-      // Rate limit: 1 req/sec on free tier
-      await new Promise((r) => setTimeout(r, 1200));
+      await sleep(1200); // respect 1 req/sec free-tier limit
     }
     console.log('');
   }
 
-  // ── Crypto: 1-minute bar nearest 4 PM ET ─────────────────────────────────
+  // ── 2. Crypto ────────────────────────────────────────────────────────────────
   if (cryptoToFetch.length > 0) {
-    const targetUTC = new Date(get4PMETUtcMs(officialDateET));
-    console.log(
-      `₿   Fetching crypto prices at or nearest to 4:00 PM ET ` +
-      `(${targetUTC.toISOString()}) for ${cryptoToFetch.length} symbol(s):\n`,
-    );
+    console.log(`₿   Crypto (${cryptoToFetch.length} symbol${cryptoToFetch.length > 1 ? 's' : ''}) — nearest 1-min bar to ${targetUTCStr}:\n`);
 
     for (const symbol of cryptoToFetch) {
-      process.stdout.write(`   ${symbol.padEnd(12)} ...`);
-      const result = await fetchCryptoAt4PMET(symbol, officialDateET, apiKey);
+      process.stdout.write(`   ${symbol.padEnd(12)} `);
+      const r = await fetchCryptoAt4PMET(symbol, officialDateET, apiKey);
 
-      if (result) {
-        process.stdout.write(` ✓  $${result.price}  (${result.diffMinutes.toFixed(1)} min from target)\n`);
-        console.log(`               Actual bar: ${result.actualDatetime}`);
-        results[symbol] = result.price;
-        metaResults[symbol] = { actualDatetime: result.actualDatetime, source: result.source };
+      if (r) {
+        process.stdout.write(`✓  $${r.price}  (diff: ${r.diffMinutes.toFixed(1)} min)\n`);
+        console.log(`               Bar: ${r.actualDatetime}`);
+        results[symbol] = r.price;
+        metaResults[symbol] = { actualDatetime: r.actualDatetime, source: r.source };
       } else {
-        process.stdout.write(` ✗  unavailable\n`);
+        process.stdout.write(`✗  failed — see error above\n`);
         failed.push(symbol);
       }
 
-      await new Promise((r) => setTimeout(r, 1200));
+      await sleep(1200);
     }
     console.log('');
   }
 
-  // ── Write results ─────────────────────────────────────────────────────────
-  if (Object.keys(results).length > 0 && !DRY_RUN) {
+  // ── 3. Write ─────────────────────────────────────────────────────────────────
+  const capturedCount = Object.keys(results).length;
+
+  if (capturedCount > 0 && !DRY_RUN) {
     for (const [sym, price] of Object.entries(results)) {
       config.startPrices[sym] = price;
     }
@@ -301,30 +411,36 @@ async function main() {
       config.startPriceMeta[sym] = meta;
     }
     saveConfig(config);
-    console.log(`✅  Wrote ${Object.keys(results).length} price(s) to contest.config.json`);
+    console.log(`✅  Wrote ${capturedCount} price(s) to ${CONFIG_PATH}`);
   }
 
+  // ── 4. Report failures ───────────────────────────────────────────────────────
   if (failed.length > 0) {
-    console.log('\n──────────────────────────────────────────────────────');
-    console.log('⚠️   The following prices could not be captured automatically');
-    console.log('    and must be entered manually in contest.config.json:\n');
+    console.log('\n──────────────────────────────────────────────────────────────');
+    console.log(`⚠️   ${failed.length} symbol(s) could not be captured:`);
+    console.log('');
     for (const sym of failed) {
-      const isCrypto = CRYPTO_SYMBOLS.has(sym);
-      if (isCrypto) {
-        console.log(`    "${sym}": <price at 4:00 PM ET on ${officialDateET}>,`);
+      if (CRYPTO_SYMBOLS.has(sym)) {
+        console.log(`    "${sym}": <price at 4:00 PM ET (20:00 UTC) on ${officialDateET}>`);
       } else {
-        console.log(`    "${sym}": <official regular-session close on ${officialDateET}>,`);
+        console.log(`    "${sym}": <official regular-session close on ${officialDateET}>`);
       }
     }
-    console.log('\n    Possible reasons:');
-    console.log('    • Market was closed on that date (check if it was a trading day)');
-    console.log('    • Minute-level historical data unavailable on your Twelve Data plan');
-    console.log('    • Rate limit reached — try again or check https://twelvedata.com/pricing');
-    console.log('──────────────────────────────────────────────────────\n');
+    console.log('');
+    console.log('    Check the ⛔ errors above for the specific Twelve Data error code.');
+    console.log('    Common causes:');
+    console.log('      • Plan does not include historical time_series (upgrade or use /price endpoint)');
+    console.log('      • Symbol not recognised on your plan (check spelling)');
+    console.log('      • Daily API credit limit reached');
+    console.log('──────────────────────────────────────────────────────────────\n');
     process.exit(failed.length === symbols.length ? 1 : 0);
   }
 
-  console.log('\n🎉  Done. All prices captured.\n');
+  console.log('\n🎉  All prices captured.\n');
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 main().catch((err) => {
