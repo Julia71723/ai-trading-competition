@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import type { ContestConfig, Prices, PortfolioState, BenchmarkState, HistoryPoint } from '@/lib/types';
 import type { MarketDataResponse, MarketHistoryResponse } from '@/lib/types';
 import {
@@ -13,12 +14,18 @@ import { buildHistorySeries, forwardFillPrices, buildMasterTimeline } from '@/li
 import { PORTFOLIOS, BENCHMARK } from '@/lib/portfolios';
 import { Hero } from './Hero';
 import { Leaderboard } from './Leaderboard';
-import { PerformanceChart } from './PerformanceChart';
 import { PortfolioPanel } from './PortfolioPanel';
 import { SharedPicks } from './SharedPicks';
 import { Methodology } from './Methodology';
 import { Disclaimer } from './Disclaimer';
 import { PurchaseRecord } from './PurchaseRecord';
+
+// Load the chart client-only; Chart.js requires browser canvas APIs and must
+// not run during server-side rendering.
+const PerformanceChart = dynamic(
+  () => import('./PerformanceChart').then((m) => ({ default: m.PerformanceChart })),
+  { ssr: false },
+);
 
 interface Props {
   contestConfig: ContestConfig;

@@ -8,6 +8,8 @@ import {
   LinearScale,
   PointElement,
   LineElement,
+  LineController,
+  Title,
   Tooltip,
   Legend,
   Filler,
@@ -15,7 +17,18 @@ import {
   type ChartOptions,
 } from 'chart.js';
 
-Chart.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, Filler);
+// Register all components required for a line chart once at module scope.
+Chart.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  LineController,
+  Title,
+  Tooltip,
+  Legend,
+  Filler,
+);
 
 const COLORS = {
   chatgpt: '#22c55e',
@@ -23,6 +36,14 @@ const COLORS = {
   gemini: '#3b82f6',
   spy: '#a855f7',
 };
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/** Parse "YYYY-MM-DD" without relying on locale or timezone. */
+function fmtDateLabel(dateStr: string): string {
+  const parts = dateStr.split('-');
+  return `${MONTHS[parseInt(parts[1], 10) - 1]} ${parseInt(parts[2], 10)}`;
+}
 
 type ChartMode = 'pct' | 'value';
 
@@ -35,6 +56,7 @@ interface Props {
   pricesPending?: boolean;
 }
 
+/** Convert return % to portfolio value. Always returns a finite number. */
 function toValue(pct: number | null): number | null {
   if (pct === null) return null;
   return 10000 * (1 + pct / 100);
@@ -57,10 +79,7 @@ export function PerformanceChart({ series, mode, onModeChange, isLoading, prices
 
     if (ph) ph.style.display = 'none';
 
-    const labels = series.map((p) => {
-      const d = new Date(p.date + 'T00:00:00Z');
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-    });
+    const labels = series.map((p) => fmtDateLabel(p.date));
 
     function makeDataset(
       label: string,
@@ -85,7 +104,8 @@ export function PerformanceChart({ series, mode, onModeChange, isLoading, prices
       };
     }
 
-    // Baseline reference line — 0% in return mode, $10,000 in value mode
+    // Baseline reference line — 0% in return mode, $10,000 in value mode.
+    // Must sit at the same reference as the data so the y-axis scales correctly.
     const baselineRef = mode === 'pct' ? 0 : 10000;
     const zeroLine = {
       label: '',
@@ -192,7 +212,7 @@ export function PerformanceChart({ series, mode, onModeChange, isLoading, prices
     }
 
     return () => {
-      // Don't destroy on mode change — update instead.
+      // Keep the chart instance alive across mode/series changes; destroy in cleanup below.
     };
   }, [series, mode]);
 
