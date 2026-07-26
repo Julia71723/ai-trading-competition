@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/refresh-quotes",
+      "schedule": "0,30 * * * *"
+    }
+  ]
+}

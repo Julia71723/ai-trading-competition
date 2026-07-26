@@ -11,6 +11,7 @@ import {
   isContestConfigured,
 } from '@/lib/calculations';
 import { buildHistorySeries, forwardFillPrices, buildMasterTimeline } from '@/lib/history';
+import { isMarketDay } from '@/lib/market-calendar';
 import { PORTFOLIOS, BENCHMARK } from '@/lib/portfolios';
 import { Hero } from './Hero';
 import { Leaderboard } from './Leaderboard';
@@ -33,53 +34,123 @@ interface Props {
 
 type ChartMode = 'pct' | 'value';
 
+const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const WAVE2_DELAY_MS = 65_000; // 65 seconds between Wave 1 and Wave 2 on market days
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export function Dashboard({ contestConfig }: Props) {
   const configured = useMemo(() => isContestConfigured(contestConfig), [contestConfig]);
 
+  // prices is cumulative: each wave's result is merged in with spread.
+  // This ensures Wave 1 data stays visible while Wave 2 is still pending.
   const [prices, setPrices] = useState<Prices | null>(null);
   const [historyResponse, setHistoryResponse] = useState<MarketHistoryResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [wave2Pending, setWave2Pending] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [isFresh, setIsFresh] = useState(false);
   const [chartMode, setChartMode] = useState<ChartMode>('pct');
 
-  const fetchData = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
+  // ── History fetch (independent of wave cycle) ─────────────────────────────
+
+  const fetchHistory = useCallback(async () => {
     try {
-      const [pricesRes, histRes] = await Promise.all([
-        fetch('/api/market-data', { cache: 'no-store' }),
-        fetch('/api/market-history', { cache: 'no-store' }),
-      ]);
-
-      const pricesData: MarketDataResponse = await pricesRes.json();
-      if (pricesData.error && !pricesRes.ok) {
-        setError(pricesData.error);
-      } else {
-        setPrices(pricesData.prices);
-        setIsFresh(pricesData.isFresh);
-        setLastUpdated(pricesData.timestamp);
-      }
-
-      if (histRes.ok) {
-        const histData: MarketHistoryResponse = await histRes.json();
-        setHistoryResponse(histData);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch market data');
-    } finally {
-      setIsLoading(false);
+      const res = await fetch('/api/market-history', { cache: 'no-store' });
+      if (res.ok) setHistoryResponse(await res.json());
+    } catch {
+      // history is non-critical; fail silently
     }
   }, []);
 
-  useEffect(() => {
-    if (configured) fetchData();
-    else setIsLoading(false);
-  }, [configured, fetchData]);
+  // ── Single-wave quote fetch ───────────────────────────────────────────────
 
-  // Compute portfolio states
+  const fetchWave = useCallback(async (waveNum: 1 | 2): Promise<void> => {
+    try {
+      const res = await fetch(`/api/market-data?wave=${waveNum}`, { cache: 'no-store' });
+      const data: MarketDataResponse = await res.json();
+
+      const newPrices = data.prices;
+      if (newPrices && Object.keys(newPrices).length > 0) {
+        // Spread-merge so existing prices from the other wave are preserved
+        setPrices((prev) => ({ ...prev, ...newPrices }));
+        if (waveNum === 1) setLastUpdated(data.timestamp);
+        if (waveNum === 2) {
+          setLastUpdated(data.timestamp);
+          setIsFresh(data.isFresh ?? false);
+        }
+      }
+
+      // A 503 means the API key is not configured — surface it once.
+      // A 502 (rate limit / network) is transient; stale prices stay on screen.
+      if (res.status === 503 && data.error) {
+        console.error(`[wave${waveNum}] fatal:`, data.error);
+      } else if (!res.ok) {
+        console.warn(`[wave${waveNum}] non-fatal (${res.status}):`, data.error ?? res.statusText);
+      }
+    } catch (err) {
+      console.warn(`[wave${waveNum}] network error:`, err);
+    }
+  }, []);
+
+  // ── Wave orchestration ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!configured) {
+      setIsLoading(false);
+      return;
+    }
+
+    let alive = true;
+
+    async function runCycle(isInitialLoad: boolean): Promise<void> {
+      const marketDay = isMarketDay();
+
+      if (isInitialLoad) {
+        // First load: fetch both waves in parallel. Speed matters more here
+        // than rate-limit spacing (two calls from a single visitor is fine).
+        setIsLoading(true);
+        await Promise.all([fetchWave(1), fetchWave(2), fetchHistory()]);
+        if (alive) {
+          setIsLoading(false);
+          setWave2Pending(false);
+        }
+      } else if (!marketDay) {
+        // Weekend / holiday: stocks don't change — only refresh crypto.
+        // Wave 1 returns the server's cached stock prices from the last market close.
+        await Promise.all([fetchWave(1), fetchWave(2)]);
+      } else {
+        // Market-day refresh: Wave 1 first, then at least 65 s later Wave 2.
+        // The delay keeps us well within Twelve Data's per-minute call limit.
+        setWave2Pending(true);
+        await fetchWave(1);
+        if (!alive) return;
+
+        await sleep(WAVE2_DELAY_MS);
+        if (!alive) return;
+
+        await fetchWave(2);
+        if (alive) setWave2Pending(false);
+      }
+
+      // Schedule the next cycle
+      if (alive) {
+        setTimeout(() => {
+          if (alive) runCycle(false);
+        }, REFRESH_INTERVAL_MS);
+      }
+    }
+
+    runCycle(true);
+    return () => {
+      alive = false;
+    };
+  }, [configured, fetchWave, fetchHistory]);
+
+  // ── Derived state ─────────────────────────────────────────────────────────
+
   const portfolioStates = useMemo<PortfolioState[] | null>(() => {
     if (!configured || !prices) return null;
     const raw = PORTFOLIOS.map((p) =>
@@ -94,13 +165,11 @@ export function Dashboard({ contestConfig }: Props) {
     return computeBenchmarkState(contestConfig, prices);
   }, [configured, prices, contestConfig]);
 
-  // Build history series client-side from raw daily prices
   const historySeries = useMemo<HistoryPoint[] | null>(() => {
     if (!configured || !historyResponse || historyResponse.dates.length === 0) return null;
 
     const { dailyPrices, dates } = historyResponse;
 
-    // Asset class lookup for forward-fill
     const assetClasses: Record<string, 'stock' | 'crypto'> = {};
     for (const p of PORTFOLIOS) {
       for (const h of p.holdings) assetClasses[h.apiSymbol] = h.assetClass;
@@ -109,11 +178,9 @@ export function Dashboard({ contestConfig }: Props) {
 
     const filled = forwardFillPrices(dailyPrices, assetClasses, dates);
 
-    // Append current quote as last point if today is after last date
     const today = new Date().toISOString().split('T')[0];
     const allDates = dates.includes(today) ? dates : [...dates, today];
 
-    // Ensure current prices are in filled for today
     if (prices && !dates.includes(today)) {
       for (const [sym, price] of Object.entries(prices)) {
         if (!filled[sym]) filled[sym] = {};
@@ -124,11 +191,9 @@ export function Dashboard({ contestConfig }: Props) {
     const masterDates = buildMasterTimeline(dates[0], today);
     const refilled = forwardFillPrices(filled, assetClasses, masterDates);
 
-    // Insert day-0 as all-zero series point
     const startDate = dates[0];
     const series = buildHistorySeries(allDates, refilled, PORTFOLIOS, contestConfig);
 
-    // Force the first point (contest start) to 0%
     const startIdx = series.findIndex((p) => p.date === startDate);
     if (startIdx >= 0) {
       series[startIdx] = { date: startDate, chatgpt: 0, claude: 0, gemini: 0, spy: 0 };
@@ -137,8 +202,6 @@ export function Dashboard({ contestConfig }: Props) {
     return series;
   }, [configured, historyResponse, prices, contestConfig]);
 
-  // Baseline series: single point at contest start, all series at 0% / $10,000.
-  // Used as a fallback when real history data hasn't loaded yet.
   const startDateStr = useMemo(
     () => new Date(contestConfig.officialPurchaseTimestamp).toISOString().split('T')[0],
     [contestConfig.officialPurchaseTimestamp],
@@ -148,6 +211,8 @@ export function Dashboard({ contestConfig }: Props) {
     [startDateStr],
   );
   const displaySeries = historySeries ?? baselineSeries;
+
+  // ── Pre-contest view ──────────────────────────────────────────────────────
 
   if (!configured) {
     return (
@@ -185,6 +250,8 @@ export function Dashboard({ contestConfig }: Props) {
     );
   }
 
+  // ── Live contest view ─────────────────────────────────────────────────────
+
   return (
     <>
       <Hero
@@ -192,14 +259,36 @@ export function Dashboard({ contestConfig }: Props) {
         lastUpdated={lastUpdated}
         isFresh={isFresh}
         isLoading={isLoading}
-        onRefresh={fetchData}
+        onRefresh={() => {
+          // Manual refresh: re-run the cycle immediately (treated as non-initial
+          // so the 65-second delay applies on market days)
+          if (isMarketDay()) {
+            setWave2Pending(true);
+            fetchWave(1).then(() =>
+              sleep(WAVE2_DELAY_MS).then(() => {
+                fetchWave(2).then(() => setWave2Pending(false));
+              }),
+            );
+          } else {
+            Promise.all([fetchWave(1), fetchWave(2)]);
+          }
+        }}
       />
 
       <div className="main-content">
-        {error && (
-          <div className="error-banner" role="alert">
-            <span>⚠ {error}</span>
-            <button className="retry-btn" onClick={fetchData}>Retry</button>
+        {wave2Pending && (
+          <div
+            style={{
+              padding: '8px 18px',
+              fontSize: '0.72rem',
+              color: 'var(--muted)',
+              background: 'var(--surface2)',
+              border: '1px solid var(--border)',
+              borderRadius: 7,
+              marginBottom: 12,
+            }}
+          >
+            ⏳ Stock prices updated — crypto refresh in ~65 s
           </div>
         )}
 
