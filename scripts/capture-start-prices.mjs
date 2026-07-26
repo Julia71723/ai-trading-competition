@@ -196,26 +196,31 @@ async function fetchStockDailyClose(symbol, dateStr, apiKey) {
  * Fetch the crypto price at or nearest to 4:00 PM ET on dateStr.
  * July 24, 2026 is in EDT, so the target is 20:00:00 UTC.
  *
- * Fetches a 20-minute window of 1-min bars centered on 20:00 UTC.
- * The start_date MUST include seconds ("YYYY-MM-DD HH:MM:SS"); Twelve Data
- * rejects "HH:MM" for intraday intervals.
+ * Uses a ±5-minute window (19:55–20:05 UTC) with ISO T-format datetimes and
+ * explicit timezone=UTC so Twelve Data returns the correct historical window
+ * instead of falling back to the most recent bars.
  */
 async function fetchCryptoAt4PMET(symbol, dateStr, apiKey) {
   const targetUTCMs = get4PMETUtcMs(dateStr);
   const targetUTC = new Date(targetUTCMs);
 
-  // Window: 10 minutes before the target
-  const windowStart = new Date(targetUTCMs - 10 * 60 * 1000);
-  // MUST be YYYY-MM-DD HH:MM:SS — slice(0,19) drops milliseconds and the Z
-  const windowStartStr = windowStart.toISOString().replace('T', ' ').slice(0, 19);
+  // ±5-minute window in ISO T-format. Do NOT use space-separated datetimes —
+  // Twelve Data ignores them for crypto and returns the latest bars instead.
+  const startDateParam = new Date(targetUTCMs - 5 * 60 * 1000).toISOString().slice(0, 19); // "2026-07-24T19:55:00"
+  const endDateParam   = new Date(targetUTCMs + 5 * 60 * 1000).toISOString().slice(0, 19); // "2026-07-24T20:05:00"
 
   const url =
     `https://api.twelvedata.com/time_series` +
     `?symbol=${encodeSymbol(symbol)}` +
     `&interval=1min` +
-    `&start_date=${encodeURIComponent(windowStartStr)}` +
-    `&outputsize=25` +
+    `&timezone=UTC` +
+    `&start_date=${startDateParam}` +
+    `&end_date=${endDateParam}` +
+    `&outputsize=20` +
     `&apikey=${apiKey}`;
+
+  // Log the full URL with the API key redacted so the parameters are visible
+  console.log(`         URL: ${url.replace(apiKey, '[REDACTED]')}`);
 
   let result;
   try {
@@ -236,7 +241,7 @@ async function fetchCryptoAt4PMET(symbol, dateStr, apiKey) {
   if (!Array.isArray(values) || values.length === 0) {
     console.error(
       `         ⛔  No bars returned for ${symbol} ` +
-      `(window start: ${windowStartStr} UTC, target: ${targetUTC.toISOString()}). ` +
+      `(window: ${startDateParam}–${endDateParam} UTC, target: ${targetUTC.toISOString()}). ` +
       `Minute-level history may not be available on your plan.`,
     );
     return null;
