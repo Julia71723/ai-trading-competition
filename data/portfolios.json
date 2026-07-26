@@ -1,0 +1,23 @@
+{
+  "claude": {
+    "name": "Claude",
+    "color": "#f97316",
+    "starting_cash": 10000,
+    "cash": 10000,
+    "holdings": []
+  },
+  "gpt": {
+    "name": "GPT",
+    "color": "#22c55e",
+    "starting_cash": 10000,
+    "cash": 10000,
+    "holdings": []
+  },
+  "gemini": {
+    "name": "Gemini",
+    "color": "#3b82f6",
+    "starting_cash": 10000,
+    "cash": 10000,
+    "holdings": []
+  }
+}
