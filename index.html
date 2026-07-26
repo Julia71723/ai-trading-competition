@@ -4,77 +4,136 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI Trading Competition</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --surface2: #22263a;
-      --border: #2e3347;
-      --text: #e8eaf0;
-      --muted: #8b90a7;
+      --bg: #08091180;
+      --bg-solid: #080911;
+      --surface: #0e1120;
+      --surface2: #141827;
+      --surface3: #1a1f30;
+      --border: #1c2136;
+      --border-mid: #232a42;
+      --text: #edf0f8;
+      --muted: #5e6787;
+      --muted-mid: #8b92ae;
       --claude: #f97316;
       --gpt: #22c55e;
       --gemini: #3b82f6;
       --spy: #a855f7;
-      --red: #ef4444;
+      --red: #f04747;
       --green: #22c55e;
+      --num-font: ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
     }
 
     body {
-      background: var(--bg);
+      background: var(--bg-solid);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: 14px;
       line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
 
+    /* ── Header ── */
     header {
-      padding: 24px 20px 12px;
+      background: linear-gradient(to bottom, #0c0f1e, var(--bg-solid));
       border-bottom: 1px solid var(--border);
+    }
+
+    .header-inner {
+      max-width: 1140px;
+      margin: 0 auto;
+      padding: 28px 28px 22px;
       display: flex;
-      align-items: baseline;
-      gap: 12px;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
       flex-wrap: wrap;
     }
 
-    header h1 {
-      font-size: 1.25rem;
+    .header-brand h1 {
+      font-size: 1.3rem;
       font-weight: 700;
-      letter-spacing: -0.02em;
+      letter-spacing: -0.03em;
+      color: var(--text);
+    }
+
+    .header-sub {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 3px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-weight: 500;
+    }
+
+    .header-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+      padding-top: 2px;
     }
 
     #last-updated {
-      font-size: 0.75rem;
+      font-size: 0.72rem;
       color: var(--muted);
+      letter-spacing: 0.01em;
     }
 
+    /* ── Layout ── */
     main {
-      max-width: 1100px;
+      max-width: 1140px;
       margin: 0 auto;
-      padding: 24px 20px;
+      padding: 36px 28px 60px;
       display: flex;
       flex-direction: column;
-      gap: 32px;
+      gap: 28px;
     }
 
-    /* ── Chart section ── */
-    .chart-card {
+    @media (max-width: 600px) {
+      .header-inner { padding: 20px 18px 16px; }
+      main { padding: 24px 18px 48px; gap: 20px; }
+    }
+
+    /* ── Shared card shell ── */
+    .card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 20px;
+      border-radius: 14px;
+      overflow: hidden;
     }
 
-    .chart-card h2 {
-      font-size: 0.875rem;
+    .card-header {
+      padding: 18px 22px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .section-label {
+      font-size: 0.68rem;
       font-weight: 600;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-      margin-bottom: 16px;
+      letter-spacing: 0.1em;
+    }
+
+    /* ── Chart card ── */
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 24px 20px;
+    }
+
+    .chart-card .section-label {
+      display: block;
+      margin-bottom: 18px;
     }
 
     .chart-wrapper {
@@ -86,26 +145,71 @@
       .chart-wrapper { height: 220px; }
     }
 
-    /* ── Portfolio cards ── */
+    .chart-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .chart-placeholder svg {
+      opacity: 0.2;
+    }
+
+    .chart-placeholder p {
+      font-size: 0.82rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.6;
+      max-width: 280px;
+    }
+
+    #perf-chart {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* ── Portfolio cards grid ── */
     .portfolios-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 20px;
+      grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+      gap: 18px;
     }
 
     .portfolio-card {
+      --accent: var(--border-mid);
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-top: 3px solid var(--accent);
+      border-radius: 14px;
       overflow: hidden;
+      transition: box-shadow 0.2s ease, transform 0.18s ease;
+    }
+
+    .portfolio-card:hover {
+      transform: translateY(-2px);
+      box-shadow:
+        0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+        0 8px 32px -4px color-mix(in srgb, var(--accent) 14%, transparent),
+        0 2px 8px rgba(0,0,0,0.4);
     }
 
     .portfolio-card-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 16px 18px 12px;
+      padding: 18px 20px 14px;
       border-bottom: 1px solid var(--border);
+      background: linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%,
+        var(--surface) 55%
+      );
     }
 
     .portfolio-card-title {
@@ -115,15 +219,17 @@
     }
 
     .ai-dot {
-      width: 10px;
-      height: 10px;
+      width: 9px;
+      height: 9px;
       border-radius: 50%;
       flex-shrink: 0;
+      box-shadow: 0 0 6px var(--accent);
     }
 
     .portfolio-card-title span {
       font-weight: 700;
-      font-size: 1rem;
+      font-size: 0.95rem;
+      letter-spacing: -0.01em;
     }
 
     .portfolio-value {
@@ -131,152 +237,193 @@
     }
 
     .portfolio-value .total {
-      font-size: 1.1rem;
+      font-size: 1.15rem;
       font-weight: 700;
+      letter-spacing: -0.02em;
+      font-family: var(--num-font);
+      font-variant-numeric: tabular-nums;
     }
 
     .portfolio-value .return {
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       font-weight: 600;
+      margin-top: 1px;
+      font-variant-numeric: tabular-nums;
     }
 
     .pos { color: var(--green); }
     .neg { color: var(--red); }
     .neu { color: var(--muted); }
 
-    /* Holdings table */
+    /* ── Holdings table ── */
     .holdings-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.8rem;
+      font-size: 0.79rem;
     }
 
     .holdings-table th {
       color: var(--muted);
       text-align: right;
-      padding: 8px 12px 6px;
+      padding: 9px 14px 7px;
       font-weight: 500;
-      font-size: 0.7rem;
+      font-size: 0.66rem;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.07em;
+      background: var(--surface2);
     }
 
     .holdings-table th:first-child { text-align: left; }
 
     .holdings-table td {
-      padding: 7px 12px;
+      padding: 9px 14px;
       border-top: 1px solid var(--border);
       text-align: right;
       white-space: nowrap;
+      font-family: var(--num-font);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.78rem;
+      color: var(--muted-mid);
     }
 
-    .holdings-table td:first-child { text-align: left; font-weight: 600; }
+    .holdings-table td:first-child {
+      text-align: left;
+      font-family: 'Inter', sans-serif;
+      font-weight: 600;
+      font-size: 0.79rem;
+      color: var(--text);
+      letter-spacing: 0.02em;
+    }
 
-    .holdings-table tr:hover td { background: var(--surface2); }
+    .holdings-table tr:hover td {
+      background: var(--surface3);
+    }
 
-    .cash-row td { color: var(--muted); font-style: italic; }
+    .cash-row td {
+      color: var(--muted);
+      font-style: italic;
+    }
 
-    /* Empty state */
+    .cash-row td:first-child {
+      color: var(--muted);
+    }
+
+    /* ── Empty state ── */
     .empty-state {
-      padding: 24px;
+      padding: 28px 20px;
       text-align: center;
       color: var(--muted);
-      font-size: 0.85rem;
+      font-size: 0.82rem;
     }
 
-    /* Loading */
+    /* ── Loading ── */
     #loading {
       text-align: center;
-      padding: 80px 20px;
+      padding: 100px 20px;
       color: var(--muted);
     }
 
     .spinner {
       display: inline-block;
-      width: 24px;
-      height: 24px;
-      border: 2px solid var(--border);
-      border-top-color: var(--text);
+      width: 22px;
+      height: 22px;
+      border: 2px solid var(--border-mid);
+      border-top-color: var(--muted-mid);
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Trades section */
+    /* ── Trades card ── */
     .trades-card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       overflow: hidden;
     }
 
-    .trades-card h2 {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--border);
+    .trades-card .card-header {
+      padding: 18px 22px 14px;
     }
 
     .trades-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.8rem;
+      font-size: 0.79rem;
     }
 
     .trades-table th {
       color: var(--muted);
       text-align: left;
-      padding: 8px 14px 6px;
+      padding: 9px 16px 7px;
       font-weight: 500;
-      font-size: 0.7rem;
+      font-size: 0.66rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      background: var(--surface2);
+    }
+
+    .trades-table td {
+      padding: 10px 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted-mid);
+    }
+
+    .trades-table tr:hover td { background: var(--surface3); }
+
+    .trades-table td:nth-child(5),
+    .trades-table td:nth-child(6) {
+      font-family: var(--num-font);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 5px;
+      font-size: 0.65rem;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
 
-    .trades-table td {
-      padding: 8px 14px;
-      border-top: 1px solid var(--border);
-    }
-
-    .trades-table tr:hover td { background: var(--surface2); }
-
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 0.7rem;
-      font-weight: 700;
-      text-transform: uppercase;
-    }
-
-    .badge-buy  { background: rgba(34,197,94,0.15);  color: var(--green); }
-    .badge-sell { background: rgba(239,68,68,0.15);   color: var(--red);   }
+    .badge-buy  { background: rgba(34,197,94,0.12); color: var(--green); border: 1px solid rgba(34,197,94,0.2); }
+    .badge-sell { background: rgba(240,71,71,0.12);  color: var(--red);   border: 1px solid rgba(240,71,71,0.2); }
 
     .ai-tag {
       display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 0.7rem;
+      padding: 2px 9px;
+      border-radius: 5px;
+      font-size: 0.68rem;
       font-weight: 600;
     }
 
-    .rationale { color: var(--muted); max-width: 280px; }
+    .rationale {
+      color: var(--muted);
+      max-width: 300px;
+      font-size: 0.76rem;
+    }
 
     @media (max-width: 700px) {
       .trades-table .hide-mobile { display: none; }
+      .portfolios-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
 
 <header>
-  <h1>AI Trading Competition</h1>
-  <span id="last-updated"></span>
+  <div class="header-inner">
+    <div class="header-brand">
+      <h1>AI Trading Competition</h1>
+      <p class="header-sub">Live portfolio tracker</p>
+    </div>
+    <div class="header-meta">
+      <span id="last-updated"></span>
+    </div>
+  </div>
 </header>
 
 <div id="loading">
@@ -287,8 +434,14 @@
 <main id="app" style="display:none">
 
   <section class="chart-card">
-    <h2>% Return Since Inception</h2>
+    <span class="section-label">% Return Since Inception</span>
     <div class="chart-wrapper">
+      <div class="chart-placeholder" id="chart-placeholder">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--muted-mid)">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        <p>Waiting for the first data points —<br>the chart fills in as the tracker runs.</p>
+      </div>
       <canvas id="perf-chart"></canvas>
     </div>
   </section>
@@ -296,7 +449,9 @@
   <section class="portfolios-grid" id="portfolios-grid"></section>
 
   <section class="trades-card">
-    <h2>Trade Log</h2>
+    <div class="card-header">
+      <span class="section-label">Trade Log</span>
+    </div>
     <div id="trades-container"></div>
   </section>
 
@@ -385,14 +540,15 @@ function buildChart(history, portfolios) {
       interaction: { mode: "index", intersect: false },
       plugins: {
         legend: {
-          labels: { color: "#8b90a7", boxWidth: 12, padding: 16 },
+          labels: { color: "#8b92ae", boxWidth: 12, padding: 18, font: { size: 12 } },
         },
         tooltip: {
-          backgroundColor: "#1a1d27",
-          borderColor: "#2e3347",
+          backgroundColor: "#0e1120",
+          borderColor: "#1c2136",
           borderWidth: 1,
-          titleColor: "#e8eaf0",
-          bodyColor: "#8b90a7",
+          titleColor: "#edf0f8",
+          bodyColor: "#8b92ae",
+          padding: 10,
           callbacks: {
             label: ctx => ` ${ctx.dataset.label}: ${fmtPct(ctx.parsed.y)}`,
           },
@@ -400,19 +556,25 @@ function buildChart(history, portfolios) {
       },
       scales: {
         x: {
-          ticks: { color: "#8b90a7", maxTicksLimit: 8, maxRotation: 0 },
-          grid: { color: "#2e3347" },
+          ticks: { color: "#5e6787", maxTicksLimit: 8, maxRotation: 0, font: { size: 11 } },
+          grid: { color: "#1c2136" },
+          border: { color: "#1c2136" },
         },
         y: {
           ticks: {
-            color: "#8b90a7",
+            color: "#5e6787",
+            font: { size: 11 },
             callback: v => fmtPct(v),
           },
-          grid: { color: "#2e3347" },
+          grid: { color: "#1c2136" },
+          border: { color: "#1c2136" },
         },
       },
     },
   });
+
+  const ph = document.getElementById("chart-placeholder");
+  if (ph) ph.style.display = "none";
 }
 
 // ── Portfolio cards ────────────────────────────────────────────────────────
@@ -440,6 +602,7 @@ async function buildPortfolioCards(portfolios, history) {
 
     const card = document.createElement("div");
     card.className = "portfolio-card";
+    card.style.setProperty("--accent", p.color);
 
     const returnStr = totalReturn != null
       ? `<span class="${returnClass(totalReturn)}">${fmtPct(totalReturn)}</span>`
@@ -544,7 +707,7 @@ function buildTradesTable(trades, portfolios) {
     const badgeClass = t.action?.toLowerCase() === "buy" ? "badge-buy" : "badge-sell";
     return `<tr>
       <td>${t.date ?? "—"}</td>
-      <td><span class="ai-tag" style="background:${color}22;color:${color}">${t.ai ?? "—"}</span></td>
+      <td><span class="ai-tag" style="background:${color}18;color:${color};border:1px solid ${color}30">${t.ai ?? "—"}</span></td>
       <td>${t.ticker ?? "—"}</td>
       <td><span class="badge ${badgeClass}">${t.action ?? "—"}</span></td>
       <td style="text-align:right">${t.shares != null ? fmt(t.shares, 0) : "—"}</td>
@@ -598,7 +761,7 @@ async function init() {
     buildTradesTable(trades, portfolios);
   } catch (err) {
     document.getElementById("loading").innerHTML =
-      `<div style="color:#ef4444">Error loading data: ${err.message}</div>`;
+      `<div style="color:#f04747">Error loading data: ${err.message}</div>`;
     console.error(err);
   }
 }
