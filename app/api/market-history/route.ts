@@ -51,15 +51,8 @@ export async function GET(): Promise<NextResponse> {
 
   try {
     const provider = await createProvider();
-    const barsMap = await provider.getDailyBarsBatch(ALL_SYMBOLS, startDateStr, todayStr);
 
-    // Convert bars to date-keyed maps
-    const rawPrices: Record<string, Record<string, number>> = {};
-    for (const [sym, bars] of Object.entries(barsMap)) {
-      rawPrices[sym] = barsToDateMap(bars);
-    }
-
-    // Build asset-class lookup for forward-fill logic
+    // Build asset-class lookup; separate symbols for different fetch strategies
     const assetClasses: Record<string, 'stock' | 'crypto'> = {};
     for (const p of PORTFOLIOS) {
       for (const h of p.holdings) {
@@ -67,6 +60,22 @@ export async function GET(): Promise<NextResponse> {
       }
     }
     assetClasses[config.benchmarkSymbol] = 'stock';
+
+    const cryptoSymbols = ALL_SYMBOLS.filter((s) => assetClasses[s] === 'crypto');
+    const stockSymbols = ALL_SYMBOLS.filter((s) => assetClasses[s] !== 'crypto');
+
+    // Stocks/ETFs: use official daily close; crypto: use 1h bars → 4 PM ET per day
+    const [stockBarsMap, cryptoBarsMap] = await Promise.all([
+      provider.getDailyBarsBatch(stockSymbols, startDateStr, todayStr),
+      provider.getCryptoDailyCloseBatch(cryptoSymbols, startDateStr, todayStr),
+    ]);
+    const barsMap = { ...stockBarsMap, ...cryptoBarsMap };
+
+    // Convert bars to date-keyed maps
+    const rawPrices: Record<string, Record<string, number>> = {};
+    for (const [sym, bars] of Object.entries(barsMap)) {
+      rawPrices[sym] = barsToDateMap(bars);
+    }
 
     const dates = buildMasterTimeline(startDateStr, todayStr);
     const filledPrices = forwardFillPrices(rawPrices, assetClasses, dates);

@@ -24,7 +24,7 @@ import type { ContestConfig } from '../lib/types';
 
 const SAMPLE_CONFIG: ContestConfig = {
   contestName: 'Test Contest',
-  officialPurchaseTimestamp: '2026-07-27T09:30:00-04:00',
+  officialPurchaseTimestamp: '2026-07-24T16:00:00-04:00',
   endTimestamp: '2026-12-31T16:00:00-05:00',
   startingValue: 10000,
   benchmarkSymbol: 'SPY',

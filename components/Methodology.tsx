@@ -7,7 +7,7 @@ const RULES = [
   'No model saw another model\'s portfolio.',
   'Every portfolio began with $10,000.',
   'Fractional shares are used — quantities are exact.',
-  'All official purchase prices use the same timestamp (market open, July 27, 2026).',
+  'All official purchase prices use Friday, July 24, 2026: US stocks and SPY use the official regular-session closing price (4:00 PM ET); crypto positions (BTC, ETH, SOL) use the price at or nearest to 4:00 PM ET.',
   'No position can be sold, replaced, added to or rebalanced.',
   'Holdings remain fixed through December 31, 2026.',
   'The S&P 500 comparison uses SPY as a price-return proxy (dividends excluded).',

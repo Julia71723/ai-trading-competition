@@ -23,6 +23,17 @@ export interface MarketDataProvider {
     startDate: string,
     endDate: string,
   ): Promise<Record<string, DailyBar[]>>;
+
+  /**
+   * For crypto symbols: fetch hourly bars and extract the price at or nearest to
+   * 4:00 PM ET for each calendar day. Returns one DailyBar per calendar day.
+   * Returns a map of apiSymbol → bars array.
+   */
+  getCryptoDailyCloseBatch(
+    symbols: string[],
+    startDate: string,
+    endDate: string,
+  ): Promise<Record<string, DailyBar[]>>;
 }
 
 export async function createProvider(): Promise<MarketDataProvider> {

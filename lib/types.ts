@@ -1,3 +1,10 @@
+export interface StartPriceMeta {
+  /** The actual datetime of the bar used (UTC for crypto, "YYYY-MM-DD official close" for stocks). */
+  actualDatetime: string;
+  /** Source description: "1day close" or "1min bar (nearest 4 PM ET)". */
+  source: string;
+}
+
 export interface ContestConfig {
   contestName: string;
   officialPurchaseTimestamp: string;
@@ -5,6 +12,8 @@ export interface ContestConfig {
   startingValue: number;
   benchmarkSymbol: string;
   startPrices: Record<string, number | null>;
+  /** Optional metadata for each start price (written by capture-start-prices.mjs). */
+  startPriceMeta?: Record<string, StartPriceMeta>;
 }
 
 export type AssetClass = 'stock' | 'crypto';

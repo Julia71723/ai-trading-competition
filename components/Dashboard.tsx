@@ -18,6 +18,7 @@ import { PortfolioPanel } from './PortfolioPanel';
 import { SharedPicks } from './SharedPicks';
 import { Methodology } from './Methodology';
 import { Disclaimer } from './Disclaimer';
+import { PurchaseRecord } from './PurchaseRecord';
 
 interface Props {
   contestConfig: ContestConfig;
@@ -25,7 +26,7 @@ interface Props {
 
 type ChartMode = 'pct' | 'value';
 
-function SetupBanner() {
+function SetupBanner({ contestConfig }: { contestConfig: ContestConfig }) {
   return (
     <div className="main-content" style={{ paddingTop: 32 }}>
       <div className="setup-banner">
@@ -41,43 +42,7 @@ function SetupBanner() {
         </p>
       </div>
 
-      {/* Show portfolios and allocations even in setup state */}
-      <div className="setup-allocation-grid">
-        {PORTFOLIOS.map((p) => (
-          <div key={p.id} className="portfolio-panel" style={{ '--accent': p.color } as React.CSSProperties}>
-            <div className="panel-header" style={{ alignItems: 'center' }}>
-              <div className="panel-title">
-                <div className="panel-dot" style={{ background: p.color }} />
-                <span className="panel-name">{p.name}</span>
-              </div>
-              <span style={{ fontSize: '0.78rem', color: 'var(--muted)', fontFamily: 'var(--num-font)' }}>
-                $10,000
-              </span>
-            </div>
-            <table className="holdings-table">
-              <thead>
-                <tr>
-                  <th>Asset</th>
-                  <th>Class</th>
-                  <th>Allocation</th>
-                  <th>Weight</th>
-                </tr>
-              </thead>
-              <tbody>
-                {p.holdings.map((h) => (
-                  <tr key={h.apiSymbol}>
-                    <td>{h.name}<br /><span style={{ fontSize: '0.72rem', color: 'var(--muted)', fontWeight: 600 }}>{h.ticker}</span></td>
-                    <td><span className={`asset-class-badge ${h.assetClass}`}>{h.assetClass}</span></td>
-                    <td>${h.allocation.toLocaleString()}</td>
-                    <td>{(h.weight * 100).toFixed(0)}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ))}
-      </div>
-
+      <PurchaseRecord contestConfig={contestConfig} />
       <SharedPicks portfolios={PORTFOLIOS} />
       <Methodology />
       <Disclaimer />
@@ -198,7 +163,7 @@ export function Dashboard({ contestConfig }: Props) {
           isLoading={false}
           onRefresh={() => {}}
         />
-        <SetupBanner />
+        <SetupBanner contestConfig={contestConfig} />
       </>
     );
   }
@@ -243,6 +208,7 @@ export function Dashboard({ contestConfig }: Props) {
           />
         ))}
 
+        <PurchaseRecord contestConfig={contestConfig} />
         <SharedPicks portfolios={PORTFOLIOS} />
         <Methodology />
         <Disclaimer />

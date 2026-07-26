@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 """
+LEGACY — superseded by the Next.js API routes (app/api/market-data and
+app/api/market-history), which fetch prices server-side via Twelve Data
+on every request with CDN caching.
+
+This script was used during the original static-site phase and is kept
+only for historical reference. It should not be run against the current
+project.
+
+Original description:
 Reads portfolios.json, fetches current prices via yfinance,
 computes total portfolio values, appends to history.json.
 Skips gracefully if market is closed or no new data.

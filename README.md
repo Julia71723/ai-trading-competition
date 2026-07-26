@@ -76,23 +76,30 @@ npm run dev
 **Before the prices are set**, the site displays "Waiting for official purchase prices"
 and shows the portfolio allocations without any returns.
 
-### Option A — run the capture script on purchase day
+### Pricing methodology
 
-On July 27, 2026, at or after 9:30 AM ET, run:
+| Symbol type | Source |
+|-------------|--------|
+| US stocks (IREN, ASTS, RKLB, NVDA, MU, PLTR, TSLA) | Official regular-session close, July 24, 2026 (4:00 PM ET) |
+| SPY | Official regular-session close, July 24, 2026 (4:00 PM ET) |
+| Crypto (BTC/USD, ETH/USD, SOL/USD) | Price at or nearest to 4:00 PM ET on July 24, 2026 (1-min bar) |
+
+After-hours prices are **not** used. Midnight UTC daily closes are **not** substituted for crypto.
+
+### Option A — run the capture script
 
 ```bash
 export TWELVE_DATA_API_KEY=your_key_here
 node scripts/capture-start-prices.mjs
 ```
 
-The script fetches the 1-minute bar at `officialPurchaseTimestamp` for each symbol
-and writes the prices into `contest.config.json`. It will never overwrite prices that
-are already set unless you pass `--force`.
+The script automatically applies the correct methodology per symbol type:
+- Stocks/SPY: fetches the `1day` bar for July 24, 2026
+- Crypto: fetches 1-minute bars around 4:00 PM ET (20:00 UTC) and picks the nearest
 
-If minute-level data is unavailable on your plan, the script exits and tells you
-which symbols to enter manually (see Option B).
+Prices already set in `contest.config.json` are skipped unless you pass `--force`.
+If any symbol cannot be retrieved accurately, it is left null with a clear report.
 
-Options:
 ```bash
 node scripts/capture-start-prices.mjs --dry-run   # print prices without writing
 node scripts/capture-start-prices.mjs --force      # overwrite existing prices
@@ -100,8 +107,9 @@ node scripts/capture-start-prices.mjs --force      # overwrite existing prices
 
 ### Option B — manual entry
 
-Open `contest.config.json` and fill in each null value with the price at
-`officialPurchaseTimestamp` (July 27, 2026 at 9:30:00 AM ET):
+Open `contest.config.json` and fill in each null value:
+- US stocks/SPY: the official regular-session closing price on Friday, July 24, 2026
+- Crypto: the price at or nearest to 4:00 PM ET (20:00 UTC) on July 24, 2026
 
 ```json
 {
@@ -131,14 +139,14 @@ Edit `contest.config.json`:
 
 ```json
 {
-  "officialPurchaseTimestamp": "2026-07-27T09:30:00-04:00",
+  "officialPurchaseTimestamp": "2026-07-24T16:00:00-04:00",
   "endTimestamp": "2026-12-31T16:00:00-05:00"
 }
 ```
 
 The timestamp is used for:
 - The countdown display
-- The `capture-start-prices.mjs` script (determines which minute bar to fetch)
+- The `capture-start-prices.mjs` script (determines the official date and target time)
 - The historical series start date
 
 **Do not change the timestamp after starting prices have been entered.** The prices

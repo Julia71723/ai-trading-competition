@@ -1,48 +1,41 @@
-name: Update Portfolio Data
+# LEGACY — This workflow is disabled.
+#
+# Market data is now fetched server-side at request time by the Next.js
+# API routes (/api/market-data and /api/market-history) via Twelve Data,
+# with CDN-layer caching. No scheduled job or data-file commits are needed.
+#
+# This file is kept for reference only. Re-enable it only if you need to
+# switch back to a static-site / commit-based data pipeline.
+
+name: "[DISABLED] Legacy Portfolio Data Update"
 
 on:
-  schedule:
-    # Every 30 min Mon–Fri 9:30am–4:00pm ET (13:30–20:00 UTC)
-    - cron: "30 13 * * 1-5"
-    - cron: "0 14 * * 1-5"
-    - cron: "30 14 * * 1-5"
-    - cron: "0 15 * * 1-5"
-    - cron: "30 15 * * 1-5"
-    - cron: "0 16 * * 1-5"
-    - cron: "30 16 * * 1-5"
-    - cron: "0 17 * * 1-5"
-    - cron: "30 17 * * 1-5"
-    - cron: "0 18 * * 1-5"
-    - cron: "30 18 * * 1-5"
-    - cron: "0 19 * * 1-5"
-    - cron: "30 19 * * 1-5"
-    - cron: "0 20 * * 1-5"
   workflow_dispatch:
-
-permissions:
-  contents: write
+    inputs:
+      confirm:
+        description: "Type LEGACY to confirm you want to run the old pipeline"
+        required: true
 
 jobs:
-  update:
+  disabled:
     runs-on: ubuntu-latest
     steps:
+      - name: Abort if not explicitly confirmed
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "LEGACY" ]; then
+            echo "This workflow is disabled. See comments in update.yml."
+            exit 1
+          fi
+          echo "Running legacy update pipeline..."
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install yfinance
-
-      - name: Run update script
-        run: python scripts/update.py
-
-      - name: Commit and push if data changed
-        run: |
+      - run: pip install yfinance
+      - run: python scripts/update.py
+      - run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/history.json data/portfolios.json
-          git diff --cached --quiet || git commit -m "chore: update portfolio data $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --cached --quiet || git commit -m "chore: legacy update $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push

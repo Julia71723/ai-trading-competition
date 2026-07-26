@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { ContestConfig } from '@/lib/types';
+import { isContestConfigured } from '@/lib/calculations';
 
 interface HeroProps {
   contestConfig: ContestConfig;
@@ -46,7 +47,7 @@ export function Hero({ contestConfig, lastUpdated, isFresh, isLoading, onRefresh
     return () => clearInterval(id);
   }, [contestConfig.endTimestamp]);
 
-  const contestStarted = Date.now() >= new Date(contestConfig.officialPurchaseTimestamp).getTime();
+  const configured = isContestConfigured(contestConfig);
 
   return (
     <header className="site-header">
@@ -84,10 +85,10 @@ export function Hero({ contestConfig, lastUpdated, isFresh, isLoading, onRefresh
             <div className="hero-meta-item">
               <span className="hero-meta-label">Status</span>
               <span className="hero-meta-value">
-                {contestStarted ? (
+                {configured ? (
                   <>
                     <span className="status-dot" aria-hidden="true" />
-                    Live
+                    Contest in progress
                   </>
                 ) : (
                   'Starting soon'
