@@ -5,16 +5,62 @@
   "startingValue": 10000,
   "benchmarkSymbol": "SPY",
   "startPrices": {
-    "IREN": null,
-    "SOL/USD": null,
-    "ASTS": null,
-    "ETH/USD": null,
-    "RKLB": null,
-    "NVDA": null,
-    "BTC/USD": null,
-    "MU": null,
-    "PLTR": null,
-    "TSLA": null,
-    "SPY": null
+    "IREN": 37.07,
+    "SOL/USD": 73.95,
+    "ASTS": 56.2,
+    "ETH/USD": 1864.44,
+    "RKLB": 63.91,
+    "NVDA": 206.84,
+    "BTC/USD": 64238,
+    "MU": 920.95001,
+    "PLTR": 122.92,
+    "TSLA": 313.029999,
+    "SPY": 738.92999
+  },
+  "startPriceMeta": {
+    "IREN": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "ASTS": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "RKLB": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "NVDA": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "MU": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "PLTR": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "TSLA": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "SPY": {
+      "actualDatetime": "2026-07-24 regular-session close (4:00 PM ET)",
+      "source": "1day close"
+    },
+    "SOL/USD": {
+      "actualDatetime": "2026-07-24 20:00:00 UTC (target: 2026-07-24T20:00:00.000Z, diff: 0.0 min)",
+      "source": "1min bar (nearest 4 PM ET)"
+    },
+    "ETH/USD": {
+      "actualDatetime": "2026-07-24 20:00:00 UTC (target: 2026-07-24T20:00:00.000Z, diff: 0.0 min)",
+      "source": "1min bar (nearest 4 PM ET)"
+    },
+    "BTC/USD": {
+      "actualDatetime": "2026-07-24 20:00:00 UTC (target: 2026-07-24T20:00:00.000Z, diff: 0.0 min)",
+      "source": "1min bar (nearest 4 PM ET)"
+    }
   }
 }
