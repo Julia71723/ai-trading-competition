@@ -94,8 +94,6 @@ export interface MarketDataResponse {
   prices: Prices;
   timestamp: string;
   isFresh: boolean;
-  /** True when Wave 2 (crypto) data is stale or not yet fetched for this cycle. */
-  wave2Pending?: boolean;
   error?: string;
 }
 

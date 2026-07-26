@@ -1,12 +1,10 @@
 import { NextResponse } from 'next/server';
 import { TwelveDataProvider } from '@/lib/twelve-data';
+import { isMarketDay } from '@/lib/market-calendar';
 import type { MarketDataResponse } from '@/lib/types';
 
-// Wave 1 — US stocks + SPY benchmark (regular-session, closed on weekends/holidays)
 const WAVE1_SYMBOLS = ['IREN', 'ASTS', 'RKLB', 'NVDA', 'MU', 'PLTR', 'TSLA', 'SPY'];
-// Wave 2 — crypto (24/7, fetched at least 65 s after Wave 1 on market days)
 const WAVE2_SYMBOLS = ['BTC/USD', 'ETH/USD', 'SOL/USD'];
-
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 interface CacheEntry {
@@ -14,61 +12,90 @@ interface CacheEntry {
   cachedAt: number;
 }
 
-// Module-level per-symbol cache.
-// On Vercel Fluid Compute, function instances are reused across requests, so this
-// cache persists between visitor requests to the same instance — effectively a
-// 30-minute in-process cache that prevents duplicate Twelve Data upstream calls.
+// Module-level per-symbol cache. Vercel Fluid Compute reuses instances across
+// concurrent requests, so this prevents duplicate Twelve Data calls within the
+// same 30-minute window on a single instance.
 const symbolCache = new Map<string, CacheEntry>();
 
-// Wave-level single-flight: at most one in-flight batch per wave.
-// Concurrent requests for the same wave all await the same Promise instead of
-// launching independent upstream fetches.
+// Global API serialization chain: Wave 1 and Wave 2 Twelve Data fetches are
+// enqueued here so they NEVER execute in parallel, even if concurrent visitors
+// trigger both waves simultaneously.
+let apiChain: Promise<void> = Promise.resolve();
+
+// Per-wave single-flight: concurrent requests for the same wave share the one
+// in-flight Promise instead of launching independent upstream fetches.
 let wave1Inflight: Promise<void> | null = null;
 let wave2Inflight: Promise<void> | null = null;
 
-function isFresh(symbol: string): boolean {
-  const entry = symbolCache.get(symbol);
-  return !!entry && Date.now() - entry.cachedAt < CACHE_TTL_MS;
+// Last upstream error per wave, cleared on the next successful fetch.
+let wave1LastErr: string | null = null;
+let wave2LastErr: string | null = null;
+
+function isFresh(sym: string): boolean {
+  const e = symbolCache.get(sym);
+  return !!e && Date.now() - e.cachedAt < CACHE_TTL_MS;
 }
 
-function allFresh(symbols: string[]): boolean {
-  return symbols.every(isFresh);
+function collectPrices(symbols: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const sym of symbols) {
+    const e = symbolCache.get(sym);
+    if (e) out[sym] = e.price;
+  }
+  return out;
 }
 
-async function fetchAndCache(provider: TwelveDataProvider, symbols: string[]): Promise<void> {
+// Enqueue fn on the serial API chain so no two Twelve Data calls ever overlap.
+// fn always runs once the previous chain link resolves (success or failure).
+function enqueueApiCall(fn: () => Promise<void>): Promise<void> {
+  const next = apiChain.then(() => fn(), () => fn());
+  // Absorb errors so the chain itself never rejects and future enqueues work.
+  apiChain = next.then(() => {}, () => {});
+  return next;
+}
+
+async function doFetch(
+  provider: TwelveDataProvider,
+  symbols: string[],
+  waveNum: 1 | 2,
+): Promise<void> {
   try {
     const prices = await provider.getLatestPrices(symbols);
     const now = Date.now();
     for (const [sym, price] of Object.entries(prices)) {
       symbolCache.set(sym, { price, cachedAt: now });
     }
+    if (waveNum === 1) wave1LastErr = null;
+    else wave2LastErr = null;
   } catch (err) {
-    // Log but preserve existing cache — stale values remain usable
-    console.error('[market-data] upstream fetch error:', err instanceof Error ? err.message : err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[market-data wave${waveNum}]`, msg);
+    if (waveNum === 1) wave1LastErr = msg;
+    else wave2LastErr = msg;
   }
 }
 
 async function refreshWave(waveNum: 1 | 2, provider: TwelveDataProvider): Promise<void> {
   const symbols = waveNum === 1 ? WAVE1_SYMBOLS : WAVE2_SYMBOLS;
-  if (allFresh(symbols)) return;
+
+  // Cache hit — serve without any upstream call.
+  if (symbols.every(isFresh)) return;
+
+  // Wave 1 on a non-trading day: stocks haven't changed; skip the Twelve Data
+  // credit. The caller uses starting prices as fallback for any missing symbols.
+  if (waveNum === 1 && !isMarketDay()) return;
 
   if (waveNum === 1) {
-    wave1Inflight ??= fetchAndCache(provider, symbols).finally(() => {
+    wave1Inflight ??= enqueueApiCall(() => doFetch(provider, symbols, 1)).finally(() => {
       wave1Inflight = null;
     });
     await wave1Inflight;
   } else {
-    wave2Inflight ??= fetchAndCache(provider, symbols).finally(() => {
+    wave2Inflight ??= enqueueApiCall(() => doFetch(provider, symbols, 2)).finally(() => {
       wave2Inflight = null;
     });
     await wave2Inflight;
   }
-}
-
-function collectAllCached(): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const [sym, entry] of symbolCache.entries()) out[sym] = entry.price;
-  return out;
 }
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -76,7 +103,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (!apiKey) {
     return NextResponse.json(
       {
-        prices: collectAllCached(),
+        prices: {},
         timestamp: new Date().toISOString(),
         isFresh: false,
         error: 'TWELVE_DATA_API_KEY is not configured on this server.',
@@ -85,35 +112,39 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
   }
 
-  const provider = new TwelveDataProvider(apiKey);
   const wave = new URL(request.url).searchParams.get('wave');
 
-  // Refresh the requested wave. Errors are swallowed inside refreshWave so
-  // we always return whatever is in the cache rather than a 5xx crash.
-  if (wave === '1') {
-    await refreshWave(1, provider);
-  } else if (wave === '2') {
-    await refreshWave(2, provider);
-  } else {
-    // No wave param (initial cold load): refresh all stale symbols in parallel
-    await Promise.all([refreshWave(1, provider), refreshWave(2, provider)]);
+  if (wave !== '1' && wave !== '2') {
+    // No wave param: return current cache state without triggering any fetch.
+    // The client always passes ?wave=1 or ?wave=2 explicitly.
+    return NextResponse.json(
+      {
+        prices: { ...collectPrices(WAVE1_SYMBOLS), ...collectPrices(WAVE2_SYMBOLS) },
+        timestamp: new Date().toISOString(),
+        isFresh: false,
+      } satisfies MarketDataResponse,
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
   }
 
-  const prices = collectAllCached();
-  const allSymbols = [...WAVE1_SYMBOLS, ...WAVE2_SYMBOLS];
-  const everythingFresh = allFresh(allSymbols);
-  const wave2Pending = !allFresh(WAVE2_SYMBOLS);
+  const waveNum = wave === '1' ? 1 : 2;
+  const provider = new TwelveDataProvider(apiKey);
+
+  await refreshWave(waveNum, provider);
+
+  const symbols = waveNum === 1 ? WAVE1_SYMBOLS : WAVE2_SYMBOLS;
+  const prices = collectPrices(symbols);
+  const fresh = symbols.every(isFresh);
+  const lastErr = waveNum === 1 ? wave1LastErr : wave2LastErr;
 
   const body: MarketDataResponse = {
     prices,
     timestamp: new Date().toISOString(),
-    isFresh: everythingFresh,
-    ...(wave2Pending && { wave2Pending: true }),
+    isFresh: fresh,
+    ...(lastErr !== null && {
+      error: 'Updating remaining market prices — cached values shown.',
+    }),
   };
 
-  return NextResponse.json(body, {
-    // No CDN-layer caching — the module-level cache handles deduplication.
-    // Clients always reach the origin and receive the current in-process cache.
-    headers: { 'Cache-Control': 'no-store' },
-  });
+  return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } });
 }
