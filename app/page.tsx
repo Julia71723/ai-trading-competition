@@ -1,18 +1,19 @@
 import { unstable_cache } from 'next/cache';
-import { getContestConfig } from '@/lib/contest-config';
+import { getContestConfig, getStartDateStr } from '@/lib/contest-config';
 import { getLatestMarketSnapshot } from '@/lib/snapshot-store';
 import { getLatestCompletedMarketDate } from '@/lib/market-calendar';
+import {
+  computeAllPortfolioStates,
+  computeBenchmarkState,
+  isContestConfigured,
+} from '@/lib/calculations';
 import { Dashboard } from '@/components/Dashboard';
+import type { PortfolioState, BenchmarkState } from '@/lib/types';
 
-// Re-read the snapshot on every request (force-dynamic) rather than relying on
-// build-time static generation. The unstable_cache below provides an in-memory
-// short-circuit across concurrent requests within the same instance and is
-// invalidated by revalidateTag('market-snapshot') after each cron write.
 export const dynamic = 'force-dynamic';
 
-// Cache the Vercel Blob read for up to 5 minutes so concurrent page requests
-// don't all hit the Blob API simultaneously. The cron endpoint invalidates this
-// cache immediately after writing a new snapshot.
+// Cache the Vercel Blob read for up to 5 minutes; invalidated by revalidateTag
+// after each cron write so visitors see fresh data within one Next.js request cycle.
 const getCachedSnapshot = unstable_cache(
   getLatestMarketSnapshot,
   ['market-snapshot'],
@@ -23,12 +24,35 @@ export default async function Page() {
   const config = getContestConfig();
   const snapshot = await getCachedSnapshot();
 
-  // Warn when the snapshot is older than the latest expected trading-session close.
   const latestExpected = getLatestCompletedMarketDate();
   const isStale =
     snapshot !== null &&
     latestExpected !== null &&
     snapshot.asOfMarketDate < latestExpected;
 
-  return <Dashboard contestConfig={config} snapshot={snapshot} isStale={isStale} />;
+  // When no snapshot exists but the contest is configured, pre-compute baseline
+  // portfolio states (start prices == current prices → all returns = 0%).
+  // These are passed to the dashboard so it can render the full leaderboard and
+  // portfolio cards at the $10,000 baseline before the first daily cron runs.
+  let baselinePortfolios: PortfolioState[] | undefined;
+  let baselineBenchmark: BenchmarkState | undefined;
+
+  if (!snapshot && isContestConfigured(config)) {
+    const startPrices = config.startPrices as Record<string, number>;
+    const startDateStr = getStartDateStr(config);
+    baselinePortfolios = computeAllPortfolioStates(config, startPrices);
+    baselineBenchmark = computeBenchmarkState(config, startPrices);
+    // Annotate with the purchase date so Dashboard can show it in the chart
+    void startDateStr;
+  }
+
+  return (
+    <Dashboard
+      contestConfig={config}
+      snapshot={snapshot}
+      isStale={isStale}
+      baselinePortfolios={baselinePortfolios}
+      baselineBenchmark={baselineBenchmark}
+    />
+  );
 }

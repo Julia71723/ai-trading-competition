@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import dynamic from 'next/dynamic';
-import type { ContestConfig, HistoryPoint } from '@/lib/types';
+import type { ContestConfig, HistoryPoint, PortfolioState, BenchmarkState } from '@/lib/types';
 import type { MarketSnapshot } from '@/lib/snapshot';
 import { isContestConfigured } from '@/lib/calculations';
 import { PORTFOLIOS } from '@/lib/portfolios';
@@ -14,7 +14,6 @@ import { Methodology } from './Methodology';
 import { Disclaimer } from './Disclaimer';
 import { PurchaseRecord } from './PurchaseRecord';
 
-// Chart.js requires browser canvas APIs — load client-only.
 const PerformanceChart = dynamic(
   () => import('./PerformanceChart').then((m) => ({ default: m.PerformanceChart })),
   { ssr: false },
@@ -26,19 +25,29 @@ interface Props {
   snapshot: MarketSnapshot | null;
   /** True when the snapshot is older than the most recent expected market close. */
   isStale: boolean;
+  /** Baseline states computed from official start prices; provided when snapshot is null. */
+  baselinePortfolios?: PortfolioState[];
+  baselineBenchmark?: BenchmarkState;
 }
 
 type ChartMode = 'pct' | 'value';
 
-export function Dashboard({ contestConfig, snapshot, isStale }: Props) {
+export function Dashboard({
+  contestConfig,
+  snapshot,
+  isStale,
+  baselinePortfolios,
+  baselineBenchmark,
+}: Props) {
   const configured = useMemo(() => isContestConfigured(contestConfig), [contestConfig]);
   const [chartMode, setChartMode] = useState<ChartMode>('pct');
 
-  // Baseline series used before any real data is available.
   const startDateStr = useMemo(
     () => new Date(contestConfig.officialPurchaseTimestamp).toISOString().split('T')[0],
     [contestConfig.officialPurchaseTimestamp],
   );
+
+  // Single-point baseline series: July 24 purchase at 0% for all portfolios.
   const baselineSeries = useMemo<HistoryPoint[]>(
     () => [{ date: startDateStr, chatgpt: 0, claude: 0, gemini: 0, spy: 0 }],
     [startDateStr],
@@ -76,48 +85,22 @@ export function Dashboard({ contestConfig, snapshot, isStale }: Props) {
     );
   }
 
-  // ── No snapshot yet ──────────────────────────────────────────────────────
-
-  if (!snapshot) {
-    return (
-      <>
-        <Hero contestConfig={contestConfig} snapshot={null} isStale={false} />
-        <div className="main-content" style={{ paddingTop: 32 }}>
-          <PerformanceChart
-            series={baselineSeries}
-            mode={chartMode}
-            onModeChange={setChartMode}
-            isLoading={false}
-          />
-          <div className="setup-banner">
-            <h2>⏳ Waiting for first market-close snapshot</h2>
-            <p>
-              The daily snapshot has not been generated yet. It will be created automatically
-              at approximately 4:20 PM ET on the next trading day. To generate it immediately,
-              call{' '}
-              <code>GET /api/cron/refresh-market-snapshot</code> with your{' '}
-              <code>CRON_SECRET</code> header.
-            </p>
-          </div>
-          <PurchaseRecord contestConfig={contestConfig} />
-          <SharedPicks portfolios={PORTFOLIOS} />
-          <Methodology />
-          <Disclaimer />
-        </div>
-      </>
-    );
-  }
-
   // ── Live contest view — render from snapshot ─────────────────────────────
 
-  const displaySeries = snapshot.chartData.length > 0 ? snapshot.chartData : baselineSeries;
+  // When a snapshot is available, use its data. When not yet available, use
+  // the baseline (start prices → 0% returns everywhere).
+  const portfolios: PortfolioState[] | null = snapshot?.portfolios ?? baselinePortfolios ?? null;
+  const benchmark: BenchmarkState | null = snapshot?.benchmark ?? baselineBenchmark ?? null;
+  const displaySeries =
+    snapshot && snapshot.chartData.length > 0 ? snapshot.chartData : baselineSeries;
 
   return (
     <>
       <Hero contestConfig={contestConfig} snapshot={snapshot} isStale={isStale} />
 
       <div className="main-content">
-        {isStale && (
+        {/* Stale snapshot warning */}
+        {snapshot && isStale && (
           <div
             style={{
               padding: '8px 18px',
@@ -134,9 +117,21 @@ export function Dashboard({ contestConfig, snapshot, isStale }: Props) {
           </div>
         )}
 
+        {/* Awaiting first snapshot banner */}
+        {!snapshot && (
+          <div className="setup-banner" style={{ marginBottom: 20 }}>
+            <h2>⏳ Awaiting first market-close snapshot</h2>
+            <p>
+              Values below use the official July 24, 2026 purchase prices as a baseline
+              (0% return). Live returns will appear automatically after the next market-close
+              snapshot is generated at approximately 4:20 PM ET on the next trading day.
+            </p>
+          </div>
+        )}
+
         <Leaderboard
-          portfolios={snapshot.portfolios}
-          benchmark={snapshot.benchmark}
+          portfolios={portfolios}
+          benchmark={benchmark}
           isLoading={false}
         />
 
@@ -151,7 +146,7 @@ export function Dashboard({ contestConfig, snapshot, isStale }: Props) {
           <PortfolioPanel
             key={p.id}
             portfolio={p}
-            state={snapshot.portfolios.find((s) => s.portfolio.id === p.id) ?? null}
+            state={portfolios?.find((s) => s.portfolio.id === p.id) ?? null}
             isLoading={false}
           />
         ))}
