@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@vercel/blob": "^2.6.1",
     "chart.js": "^4.4.3",
     "next": "^15.1.0",
     "react": "^19.0.0",

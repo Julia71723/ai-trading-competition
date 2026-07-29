@@ -2,14 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import type { ContestConfig } from '@/lib/types';
+import type { MarketSnapshot } from '@/lib/snapshot';
 import { isContestConfigured } from '@/lib/calculations';
 
 interface HeroProps {
   contestConfig: ContestConfig;
-  lastUpdated: string | null;
-  isFresh: boolean;
-  isLoading: boolean;
-  onRefresh: () => void;
+  snapshot: MarketSnapshot | null;
+  isStale: boolean;
 }
 
 function formatCountdown(ms: number): string {
@@ -27,14 +26,7 @@ function formatDateTime(isoStr: string): string {
   });
 }
 
-function formatUpdated(isoStr: string): string {
-  return new Date(isoStr).toLocaleTimeString('en-US', {
-    hour: 'numeric', minute: '2-digit', second: '2-digit',
-    timeZoneName: 'short',
-  });
-}
-
-export function Hero({ contestConfig, lastUpdated, isFresh, isLoading, onRefresh }: HeroProps) {
+export function Hero({ contestConfig, snapshot, isStale }: HeroProps) {
   const [countdown, setCountdown] = useState('');
 
   useEffect(() => {
@@ -57,17 +49,11 @@ export function Hero({ contestConfig, lastUpdated, isFresh, isLoading, onRefresh
           <span className="paper-badge">Paper trading</span>
         </div>
         <div className="header-meta">
-          {lastUpdated && (
-            <span>Updated {formatUpdated(lastUpdated)}</span>
+          {snapshot && (
+            <span style={{ color: isStale ? 'var(--muted)' : 'var(--muted-mid)' }}>
+              {snapshot.asOfLabel}
+            </span>
           )}
-          <button
-            className="refresh-btn"
-            onClick={onRefresh}
-            disabled={isLoading}
-            aria-label="Refresh market data"
-          >
-            {isLoading ? <span className="spinner" /> : '↻'} Refresh
-          </button>
         </div>
       </div>
 
@@ -108,11 +94,14 @@ export function Hero({ contestConfig, lastUpdated, isFresh, isLoading, onRefresh
               <span className="hero-meta-value countdown">{countdown || '—'}</span>
             </div>
 
-            {lastUpdated && (
+            {snapshot && (
               <div className="hero-meta-item">
                 <span className="hero-meta-label">Data</span>
-                <span className="hero-meta-value" style={{ color: isFresh ? 'var(--green)' : 'var(--muted-mid)' }}>
-                  {isFresh ? 'Live / 30 min delay' : 'Cached'}
+                <span
+                  className="hero-meta-value"
+                  style={{ color: isStale ? 'var(--muted)' : 'var(--green)' }}
+                >
+                  {isStale ? 'Stale — pending refresh' : 'Market-close snapshot'}
                 </span>
               </div>
             )}

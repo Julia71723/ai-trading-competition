@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/refresh-market-snapshot",
+      "schedule": "20 20 * * 1-5"
+    },
+    {
+      "path": "/api/cron/refresh-market-snapshot",
+      "schedule": "20 21 * * 1-5"
+    }
+  ]
+}
