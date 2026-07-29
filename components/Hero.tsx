@@ -50,8 +50,16 @@ export function Hero({ contestConfig, snapshot, isStale }: HeroProps) {
         </div>
         <div className="header-meta">
           {snapshot && (
-            <span style={{ color: isStale ? 'var(--muted)' : 'var(--muted-mid)' }}>
-              {snapshot.asOfLabel}
+            <span
+              style={{
+                color: isStale ? 'var(--muted)' : 'var(--green)',
+                fontWeight: 600,
+                fontSize: '0.8rem',
+              }}
+            >
+              {isStale
+                ? `Stale: ${snapshot.asOfLabel}`
+                : `Market snapshot: ${snapshot.asOfLabel.replace('Market close ', '')}, 4:00 PM ET`}
             </span>
           )}
         </div>
@@ -96,12 +104,14 @@ export function Hero({ contestConfig, snapshot, isStale }: HeroProps) {
 
             {snapshot && (
               <div className="hero-meta-item">
-                <span className="hero-meta-label">Data</span>
+                <span className="hero-meta-label">Prices as of</span>
                 <span
                   className="hero-meta-value"
-                  style={{ color: isStale ? 'var(--muted)' : 'var(--green)' }}
+                  style={{ color: isStale ? 'var(--muted)' : 'var(--green)', fontWeight: 600 }}
                 >
-                  {isStale ? 'Stale — pending refresh' : 'Market-close snapshot'}
+                  {isStale
+                    ? `${snapshot.asOfLabel} — refresh pending`
+                    : `${snapshot.asOfLabel.replace('Market close ', '')}, 4:00 PM ET`}
                 </span>
               </div>
             )}
