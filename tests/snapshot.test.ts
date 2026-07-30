@@ -389,6 +389,39 @@ describe('chart duplicate-point prevention', () => {
   });
 });
 
+// ── Stateless across separate serverless invocations ─────────────────────────
+
+describe('buildSnapshotsForDates — stateless across separate invocations', () => {
+  it('chains chart correctly when each invocation receives prevSnapshot from persistence only', async () => {
+    // Invocation A: a cold serverless function builds July 24 + July 29 from scratch.
+    const providerA = makeHistoricalMockProvider({
+      '2026-07-24': SAMPLE_START_PRICES,
+      '2026-07-29': SAMPLE_START_PRICES,
+    });
+    const snapsA = await buildSnapshotsForDates(
+      SAMPLE_CONFIG, providerA, null, ['2026-07-24', '2026-07-29'],
+    );
+    // The July 29 snapshot is what would be written to Vercel Blob.
+    const savedToBlob = snapsA[snapsA.length - 1];
+
+    // Invocation B: a completely separate serverless instance — providerA is gone.
+    // The only durable input is savedToBlob (read from Blob at startup).
+    const providerB = makeHistoricalMockProvider({ '2026-07-30': SAMPLE_START_PRICES });
+    const [snapB] = await buildSnapshotsForDates(
+      SAMPLE_CONFIG, providerB, savedToBlob, ['2026-07-30'],
+    );
+
+    expect(snapB.asOfMarketDate).toBe('2026-07-30');
+    // Chart grew from the Blob snapshot, not from any in-memory state left by invocation A.
+    expect(snapB.chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-29', '2026-07-30']);
+    // Each provider was consulted exactly once — no cross-invocation sharing.
+    expect(providerA.getDailyBarsBatch).toHaveBeenCalledTimes(1);
+    expect(providerB.getDailyBarsBatch).toHaveBeenCalledTimes(1);
+    expect(providerA.getCryptoDailyCloseBatch).toHaveBeenCalledTimes(1);
+    expect(providerB.getCryptoDailyCloseBatch).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ── No client-side API calls ──────────────────────────────────────────────────
 
 describe('frontend — no market-provider imports', () => {

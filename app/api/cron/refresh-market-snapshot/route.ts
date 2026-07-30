@@ -5,7 +5,7 @@ import { getContestConfig, getStartDateStr } from '@/lib/contest-config';
 import { isContestConfigured } from '@/lib/calculations';
 import { getLatestCompletedMarketDate, getMarketDaysBetween } from '@/lib/market-calendar';
 import { getLatestMarketSnapshot, saveMarketSnapshot } from '@/lib/snapshot-store';
-import { buildSnapshotsForDates, validateSnapshot } from '@/lib/snapshot-builder';
+import { buildSnapshotsForDates, validateSnapshot, WAVE_SLEEP_MS } from '@/lib/snapshot-builder';
 
 // In-process lock to prevent two concurrent requests on the same instance
 // from generating duplicate snapshots.
@@ -101,7 +101,9 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
 
     const provider = await createProvider();
-    const snapshots = await buildSnapshotsForDates(config, provider, prevSnapshot, missingDates);
+    const snapshots = await buildSnapshotsForDates(config, provider, prevSnapshot, missingDates, {
+      waveSleepMs: WAVE_SLEEP_MS,
+    });
 
     const savedDates: string[] = [];
     for (const snapshot of snapshots) {

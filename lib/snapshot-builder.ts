@@ -8,6 +8,13 @@ import { getStartDateStr } from './contest-config';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Seconds to wait between stock wave and crypto wave to stay within 8 credits/minute. */
+export const WAVE_SLEEP_MS = 65_000;
+
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
@@ -104,6 +111,7 @@ export async function buildSnapshotsForDates(
   provider: MarketDataProvider,
   prevSnapshot: MarketSnapshot | null,
   dates: string[],
+  { waveSleepMs = 0 }: { waveSleepMs?: number } = {},
 ): Promise<MarketSnapshot[]> {
   if (dates.length === 0) return [];
 
@@ -115,10 +123,31 @@ export async function buildSnapshotsForDates(
     `[snapshot-builder] fetching historical closes ${rangeStart}→${rangeEnd} (${dates.length} date(s))`,
   );
 
-  const [stockBarsMap, cryptoBarsMap] = await Promise.all([
-    provider.getDailyBarsBatch(STOCK_SYMBOLS, rangeStart, rangeEnd),
-    provider.getCryptoDailyCloseBatch(CRYPTO_SYMBOLS, rangeStart, rangeEnd),
-  ]);
+  // Wave 1: stocks + SPY (8 credits — at or near the per-minute limit on its own)
+  console.log(`[snapshot-builder] wave 1 — ${STOCK_SYMBOLS.length} stocks: ${STOCK_SYMBOLS.join(', ')}`);
+  const stockBarsMap = await provider.getDailyBarsBatch(STOCK_SYMBOLS, rangeStart, rangeEnd);
+  const stockSucceeded = STOCK_SYMBOLS.filter((s) => stockBarsMap[s]?.length > 0);
+  const stockFailed = STOCK_SYMBOLS.filter((s) => !stockBarsMap[s]?.length);
+  console.log(
+    `[snapshot-builder] wave 1 done — succeeded: [${stockSucceeded.join(', ')}]` +
+    (stockFailed.length ? ` | MISSING: [${stockFailed.join(', ')}]` : ''),
+  );
+
+  // Wait between waves so the Twelve Data rate-limit window resets before crypto fetch
+  if (waveSleepMs > 0) {
+    console.log(`[snapshot-builder] sleeping ${waveSleepMs}ms before crypto wave (rate-limit buffer)...`);
+    await sleep(waveSleepMs);
+  }
+
+  // Wave 2: crypto (3 credits)
+  console.log(`[snapshot-builder] wave 2 — ${CRYPTO_SYMBOLS.length} crypto: ${CRYPTO_SYMBOLS.join(', ')}`);
+  const cryptoBarsMap = await provider.getCryptoDailyCloseBatch(CRYPTO_SYMBOLS, rangeStart, rangeEnd);
+  const cryptoSucceeded = CRYPTO_SYMBOLS.filter((s) => cryptoBarsMap[s]?.length > 0);
+  const cryptoFailed = CRYPTO_SYMBOLS.filter((s) => !cryptoBarsMap[s]?.length);
+  console.log(
+    `[snapshot-builder] wave 2 done — succeeded: [${cryptoSucceeded.join(', ')}]` +
+    (cryptoFailed.length ? ` | MISSING: [${cryptoFailed.join(', ')}]` : ''),
+  );
 
   const rawPrices: Record<string, Record<string, number>> = {};
   for (const [sym, bars] of Object.entries({ ...stockBarsMap, ...cryptoBarsMap })) {
