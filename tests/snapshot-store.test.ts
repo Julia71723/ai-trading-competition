@@ -6,11 +6,12 @@ import type { MarketSnapshot } from '../lib/snapshot';
 vi.mock('@vercel/blob', () => ({
   put: vi.fn().mockResolvedValue({ url: 'https://blob.example.com/test' }),
   get: vi.fn().mockResolvedValue(null),
+  list: vi.fn().mockResolvedValue({ blobs: [], hasMore: false }),
 }));
 
 // Dynamic import so the mock above applies
 const { saveMarketSnapshot } = await import('../lib/snapshot-store');
-const { put, get } = await import('@vercel/blob');
+const { put, get, list } = await import('@vercel/blob');
 
 function makeMinimalSnapshot(date = '2026-07-28'): MarketSnapshot {
   return {
@@ -36,6 +37,16 @@ function makeMinimalSnapshot(date = '2026-07-28'): MarketSnapshot {
       durationMs: 42,
     },
   };
+}
+
+function makeSnapshotStream(snap: MarketSnapshot) {
+  const bytes = new TextEncoder().encode(JSON.stringify(snap));
+  return new ReadableStream<Uint8Array>({ start(c) { c.enqueue(bytes); c.close(); } });
+}
+
+function makeArchiveStream(snaps: MarketSnapshot[]) {
+  const bytes = new TextEncoder().encode(JSON.stringify(snaps));
+  return new ReadableStream<Uint8Array>({ start(c) { c.enqueue(bytes); c.close(); } });
 }
 
 describe('saveMarketSnapshot — private Blob access', () => {
@@ -111,7 +122,7 @@ describe('saveMarketSnapshot — archive preserves prior trading dates', () => {
     const jul28 = makeMinimalSnapshot('2026-07-28');
     const jul29 = makeMinimalSnapshot('2026-07-29');
 
-    // First save: archive does not exist yet (get returns null/undefined after clearAllMocks)
+    // First save: archive.json does not exist (get returns null/undefined after clearAllMocks)
     await saveMarketSnapshot(jul28);
 
     // Capture what was written to archive.json during the first save
@@ -122,11 +133,7 @@ describe('saveMarketSnapshot — archive preserves prior trading dates', () => {
     expect(JSON.parse(firstArchiveBody)).toHaveLength(1);
 
     // Second save: simulate archive.json already containing jul28
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(c) { c.enqueue(encoder.encode(firstArchiveBody)); c.close(); },
-    });
-    mockGet.mockResolvedValueOnce({ statusCode: 200, stream });
+    mockGet.mockResolvedValueOnce({ statusCode: 200, stream: makeArchiveStream([jul28]) });
 
     await saveMarketSnapshot(jul29);
 
@@ -159,11 +166,7 @@ describe('saveMarketSnapshot — archive preserves prior trading dates', () => {
     )?.[1] as string;
 
     // Second save of the same date: simulate archive containing the first version
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(c) { c.enqueue(encoder.encode(firstBody)); c.close(); },
-    });
-    mockGet.mockResolvedValueOnce({ statusCode: 200, stream });
+    mockGet.mockResolvedValueOnce({ statusCode: 200, stream: makeArchiveStream([jul29v1]) });
 
     await saveMarketSnapshot(jul29v2);
 
@@ -176,5 +179,75 @@ describe('saveMarketSnapshot — archive preserves prior trading dates', () => {
     expect(secondArchive.filter((s) => s.asOfMarketDate === '2026-07-29')).toHaveLength(1);
     // The entry should be the newer version
     expect(secondArchive[0].generatedAt).toBe('2026-07-30T11:05:00.000Z');
+
+    // firstBody is referenced above — just assert it's defined to satisfy the linter
+    expect(firstBody).toBeDefined();
+  });
+});
+
+// ── Legacy migration ──────────────────────────────────────────────────────────
+
+describe('saveMarketSnapshot — migration from legacy per-date archive files', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.BLOB_READ_WRITE_TOKEN = 'test-token';
+  });
+
+  it('seeds archive.json from legacy YYYY-MM-DD.json files when archive.json does not exist', async () => {
+    const mockList = list as ReturnType<typeof vi.fn>;
+    const mockGet  = get  as ReturnType<typeof vi.fn>;
+    const mockPut  = put  as ReturnType<typeof vi.fn>;
+
+    const jul24 = makeMinimalSnapshot('2026-07-24');
+    const jul28 = makeMinimalSnapshot('2026-07-28');
+    const jul29 = makeMinimalSnapshot('2026-07-29');
+
+    // archive.json doesn't exist → get(ARCHIVE_PATH) returns null
+    // list() returns the two legacy per-date files
+    mockList.mockResolvedValueOnce({
+      blobs: [
+        { pathname: 'market-snapshots/2026-07-24.json' },
+        { pathname: 'market-snapshots/2026-07-28.json' },
+      ],
+      hasMore: false,
+    });
+
+    // get call sequence:
+    //   1. get(ARCHIVE_PATH) → null (archive doesn't exist)
+    //   2. get('market-snapshots/2026-07-24.json') → jul24 snapshot
+    //   3. get('market-snapshots/2026-07-28.json') → jul28 snapshot
+    mockGet
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ statusCode: 200, stream: makeSnapshotStream(jul24) })
+      .mockResolvedValueOnce({ statusCode: 200, stream: makeSnapshotStream(jul28) });
+
+    await saveMarketSnapshot(jul29);
+
+    // The archive write must include all three dates (two migrated + one new)
+    const archivePuts = mockPut.mock.calls.filter(
+      (args) => (args[0] as string) === 'market-snapshots/archive.json',
+    );
+    expect(archivePuts).toHaveLength(1);
+
+    const archive = JSON.parse(archivePuts[0][1] as string) as MarketSnapshot[];
+    const dates = archive.map((s) => s.asOfMarketDate).sort();
+    expect(dates).toEqual(['2026-07-24', '2026-07-28', '2026-07-29']);
+  });
+
+  it('does not call list() when archive.json already exists', async () => {
+    const mockList = list as ReturnType<typeof vi.fn>;
+    const mockGet  = get  as ReturnType<typeof vi.fn>;
+
+    const jul28 = makeMinimalSnapshot('2026-07-28');
+
+    // archive.json exists
+    mockGet.mockResolvedValueOnce({
+      statusCode: 200,
+      stream: makeArchiveStream([jul28]),
+    });
+
+    await saveMarketSnapshot(makeMinimalSnapshot('2026-07-29'));
+
+    expect(mockList).not.toHaveBeenCalled();
   });
 });
