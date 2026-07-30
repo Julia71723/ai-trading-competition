@@ -3,14 +3,8 @@ import type { ContestConfig, HistoryPoint } from './types';
 import type { MarketDataProvider } from './provider';
 import { ALL_SYMBOLS, PORTFOLIOS, BENCHMARK } from './portfolios';
 import { computeAllPortfolioStates, computeBenchmarkState } from './calculations';
-import {
-  buildHistorySeries,
-  forwardFillPrices,
-  barsToDateMap,
-  buildMasterTimeline,
-} from './history';
+import { buildHistorySeries, forwardFillPrices, barsToDateMap } from './history';
 import { getStartDateStr } from './contest-config';
-import { getEasternDateStr } from './market-calendar';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -88,20 +82,42 @@ function computeChartPoint(
   return series[0] ?? { date, chatgpt: null, claude: null, gemini: null, spy: null };
 }
 
-// ── Full history fetch (first run only) ───────────────────────────────────────
+// ── Catch-up builder ─────────────────────────────────────────────────────────
 
-async function buildFullChartData(
-  provider: MarketDataProvider,
+/**
+ * Build one MarketSnapshot per date in `dates`, using each date's official
+ * regular-session close (1-day bars for stocks, the bar nearest 4:00 PM ET
+ * for crypto) rather than a live quote. This lets the caller "catch up" on
+ * any number of missed trading days in a single call.
+ *
+ * `dates` must be in chronological order and contain only market days
+ * (weekends/holidays already excluded by the caller). If `dates` contains
+ * exactly one date that matches the last point of `prevSnapshot.chartData`,
+ * that point is replaced rather than duplicated — this makes the function
+ * safe to call twice for the same trading date.
+ *
+ * Does NOT write to storage — the caller validates and saves each snapshot,
+ * in order, so every intermediate day is durably archived.
+ */
+export async function buildSnapshotsForDates(
   config: ContestConfig,
-  startDate: string,
-  endDate: string,
-  todayPrices: Record<string, number>,
-): Promise<HistoryPoint[]> {
-  console.log(`[snapshot-builder] fetching full history ${startDate}→${endDate}`);
+  provider: MarketDataProvider,
+  prevSnapshot: MarketSnapshot | null,
+  dates: string[],
+): Promise<MarketSnapshot[]> {
+  if (dates.length === 0) return [];
+
+  const startDate = getStartDateStr(config);
+  const rangeStart = dates[0];
+  const rangeEnd = dates[dates.length - 1];
+
+  console.log(
+    `[snapshot-builder] fetching historical closes ${rangeStart}→${rangeEnd} (${dates.length} date(s))`,
+  );
 
   const [stockBarsMap, cryptoBarsMap] = await Promise.all([
-    provider.getDailyBarsBatch(STOCK_SYMBOLS, startDate, endDate),
-    provider.getCryptoDailyCloseBatch(CRYPTO_SYMBOLS, startDate, endDate),
+    provider.getDailyBarsBatch(STOCK_SYMBOLS, rangeStart, rangeEnd),
+    provider.getCryptoDailyCloseBatch(CRYPTO_SYMBOLS, rangeStart, rangeEnd),
   ]);
 
   const rawPrices: Record<string, Record<string, number>> = {};
@@ -109,106 +125,61 @@ async function buildFullChartData(
     rawPrices[sym] = barsToDateMap(bars);
   }
 
-  // Inject today's live prices as the final close
-  for (const [sym, price] of Object.entries(todayPrices)) {
-    if (!rawPrices[sym]) rawPrices[sym] = {};
-    rawPrices[sym][endDate] = price;
-  }
+  const filledPrices = forwardFillPrices(rawPrices, ASSET_CLASSES, dates);
 
-  const masterDates = buildMasterTimeline(startDate, endDate);
-  const filledPrices = forwardFillPrices(rawPrices, ASSET_CLASSES, masterDates);
+  const snapshots: MarketSnapshot[] = [];
+  let chartData = prevSnapshot?.chartData ?? [];
 
-  const series = buildHistorySeries(masterDates, filledPrices, PORTFOLIOS, config);
+  for (const date of dates) {
+    const dateStartMs = Date.now();
 
-  // Pin the official purchase date to exactly 0%
-  const startIdx = series.findIndex((p) => p.date === startDate);
-  if (startIdx >= 0) {
-    series[startIdx] = { date: startDate, chatgpt: 0, claude: 0, gemini: 0, spy: 0 };
-  }
-
-  return series;
-}
-
-// ── Main builder ──────────────────────────────────────────────────────────────
-
-/**
- * Fetch current prices, compute all portfolio/benchmark states, extend the
- * cumulative chart, and return a complete MarketSnapshot.
- *
- * Does NOT write to storage — the caller validates and saves.
- */
-export async function buildMarketSnapshot(
-  config: ContestConfig,
-  provider: MarketDataProvider,
-  prevSnapshot: MarketSnapshot | null,
-): Promise<MarketSnapshot> {
-  const startMs = Date.now();
-  const now = new Date();
-  const todayET = getEasternDateStr(now);
-  const startDate = getStartDateStr(config);
-
-  // 1. Fetch all current prices in one batch call
-  console.log(`[snapshot-builder] fetching prices for ${ALL_SYMBOLS.length} symbols`);
-  const prices = await provider.getLatestPrices(ALL_SYMBOLS);
-  const assetsResolved = Object.keys(prices).length;
-  const missingSymbols = ALL_SYMBOLS.filter((s) => !(s in prices));
-  if (missingSymbols.length > 0) {
-    console.error(`[snapshot-builder] missing prices: ${missingSymbols.join(', ')}`);
-  } else {
-    console.log(`[snapshot-builder] all ${assetsResolved} prices resolved`);
-  }
-
-  // 2. Compute portfolio and benchmark states
-  const portfolios = computeAllPortfolioStates(config, prices);
-  const benchmark = computeBenchmarkState(config, prices);
-
-  // 3. Build or extend chart data
-  let chartData: HistoryPoint[];
-  const prevChartData = prevSnapshot?.chartData ?? [];
-  const lastChartDate = prevChartData.at(-1)?.date ?? null;
-
-  if (lastChartDate === todayET) {
-    // Cron ran twice today: replace today's last point with current prices
-    const filledToday: Record<string, Record<string, number>> = {};
-    for (const [sym, price] of Object.entries(prices)) {
-      filledToday[sym] = { [todayET]: price };
+    const prices: Record<string, number> = {};
+    for (const sym of ALL_SYMBOLS) {
+      const p = filledPrices[sym]?.[date];
+      if (p !== undefined) prices[sym] = p;
     }
-    const todayPoint = computeChartPoint(todayET, filledToday, config);
-    chartData = [...prevChartData.slice(0, -1), todayPoint];
-    console.log(`[snapshot-builder] replaced chart point for ${todayET}`);
-  } else if (prevChartData.length > 0 && lastChartDate && lastChartDate >= startDate) {
-    // Normal daily update: append today's point
-    const filledToday: Record<string, Record<string, number>> = {};
-    for (const [sym, price] of Object.entries(prices)) {
-      filledToday[sym] = { [todayET]: price };
+
+    const portfolios = computeAllPortfolioStates(config, prices);
+    const benchmark = computeBenchmarkState(config, prices);
+
+    // Pin the official purchase date to exactly 0% regardless of any tiny
+    // discrepancy between the fetched close and the recorded start price.
+    const point = date === startDate
+      ? { date, chatgpt: 0, claude: 0, gemini: 0, spy: 0 }
+      : computeChartPoint(date, filledPrices, config);
+
+    if (chartData.length > 0 && chartData[chartData.length - 1].date === date) {
+      chartData = [...chartData.slice(0, -1), point];
+      console.log(`[snapshot-builder] replaced chart point for ${date}`);
+    } else {
+      chartData = [...chartData, point];
+      console.log(`[snapshot-builder] appended chart point for ${date}`);
     }
-    const todayPoint = computeChartPoint(todayET, filledToday, config);
-    chartData = [...prevChartData, todayPoint];
-    console.log(`[snapshot-builder] appended chart point for ${todayET}`);
-  } else {
-    // First ever run (or corrupted chart): fetch full history from Twelve Data
-    chartData = await buildFullChartData(provider, config, startDate, todayET, prices);
-    console.log(`[snapshot-builder] built full chart: ${chartData.length} points`);
+
+    const assetsResolved = Object.keys(prices).length;
+    const missingSymbols = ALL_SYMBOLS.filter((s) => !(s in prices));
+    if (missingSymbols.length > 0) {
+      console.error(`[snapshot-builder] ${date}: missing prices for ${missingSymbols.join(', ')}`);
+    }
+
+    snapshots.push({
+      snapshotVersion: 1,
+      generatedAt: new Date().toISOString(),
+      asOfMarketDate: date,
+      asOfLabel: formatAsOfLabel(date),
+      status: 'complete',
+      prices,
+      benchmark,
+      portfolios,
+      chartData,
+      metadata: {
+        priceProvider: 'Twelve Data',
+        assetsRequested: ALL_SYMBOLS.length,
+        assetsResolved,
+        durationMs: Date.now() - dateStartMs,
+      },
+    });
   }
 
-  const durationMs = Date.now() - startMs;
-  console.log(`[snapshot-builder] done in ${durationMs}ms`);
-
-  return {
-    snapshotVersion: 1,
-    generatedAt: now.toISOString(),
-    asOfMarketDate: todayET,
-    asOfLabel: formatAsOfLabel(todayET),
-    status: 'complete',
-    prices,
-    benchmark,
-    portfolios,
-    chartData,
-    metadata: {
-      priceProvider: 'Twelve Data',
-      assetsRequested: ALL_SYMBOLS.length,
-      assetsResolved,
-      durationMs,
-    },
-  };
+  return snapshots;
 }

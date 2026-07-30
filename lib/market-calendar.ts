@@ -87,3 +87,26 @@ export function getLatestCompletedMarketDate(now: Date = new Date()): string | n
   }
   return null;
 }
+
+/**
+ * Returns every market trading day strictly after `afterDateStr` through
+ * `throughDateStr` (inclusive), in chronological order. Weekends and
+ * MARKET_HOLIDAYS are excluded. Used to enumerate missing snapshot dates
+ * for catch-up.
+ *
+ * Anchored at noon UTC so the ET conversion never crosses a calendar-day
+ * boundary (noon UTC is always mid-morning ET in both EDT and EST).
+ */
+export function getMarketDaysBetween(afterDateStr: string, throughDateStr: string): string[] {
+  const days: string[] = [];
+  const cur = new Date(`${afterDateStr}T12:00:00Z`);
+  const end = new Date(`${throughDateStr}T12:00:00Z`);
+  cur.setUTCDate(cur.getUTCDate() + 1);
+
+  while (cur.getTime() <= end.getTime()) {
+    if (isMarketDay(cur)) days.push(getEasternDateStr(cur));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+
+  return days;
+}

@@ -5,13 +5,41 @@ import {
   getEasternDateStr,
   getLatestCompletedMarketDate,
 } from '../lib/market-calendar';
-import { validateSnapshot, formatAsOfLabel, buildMarketSnapshot } from '../lib/snapshot-builder';
+import { validateSnapshot, formatAsOfLabel, buildSnapshotsForDates } from '../lib/snapshot-builder';
 import { buildHistorySeries } from '../lib/history';
 import { PORTFOLIOS } from '../lib/portfolios';
 import { SAMPLE_START_PRICES } from './fixtures/sample-prices';
-import type { ContestConfig } from '../lib/types';
+import type { ContestConfig, DailyBar } from '../lib/types';
 import type { MarketSnapshot } from '../lib/snapshot';
 import type { MarketDataProvider } from '../lib/provider';
+
+/**
+ * Mock provider whose historical-bar methods return a flat close price
+ * (from SAMPLE_START_PRICES, or `overrides` per date) for every requested
+ * symbol on every date present in `datesWithPrices`.
+ */
+function makeHistoricalMockProvider(
+  datesWithPrices: Record<string, Record<string, number>>,
+): MarketDataProvider {
+  const barsFor = (symbols: string[]): Record<string, DailyBar[]> => {
+    const result: Record<string, DailyBar[]> = {};
+    for (const sym of symbols) {
+      result[sym] = Object.entries(datesWithPrices)
+        .filter(([, prices]) => prices[sym] !== undefined)
+        .map(([date, prices]) => ({
+          date, open: prices[sym], high: prices[sym], low: prices[sym], close: prices[sym],
+        }));
+    }
+    return result;
+  };
+
+  return {
+    getLatestPrices: vi.fn().mockResolvedValue(SAMPLE_START_PRICES),
+    getDailyBars: vi.fn().mockResolvedValue([]),
+    getDailyBarsBatch: vi.fn(async (symbols: string[]) => barsFor(symbols)),
+    getCryptoDailyCloseBatch: vi.fn(async (symbols: string[]) => barsFor(symbols)),
+  };
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -144,9 +172,9 @@ describe('validateSnapshot — empty chartData', () => {
   });
 });
 
-// ── buildMarketSnapshot — idempotency ─────────────────────────────────────────
+// ── buildSnapshotsForDates — catch-up builder ─────────────────────────────────
 
-describe('buildMarketSnapshot — duplicate same-day invocation', () => {
+describe('buildSnapshotsForDates — same trading date invoked twice', () => {
   it('replaces the last chart point instead of appending a duplicate', async () => {
     const prevSnap = makeSnapshot({
       asOfMarketDate: '2026-07-29',
@@ -156,31 +184,19 @@ describe('buildMarketSnapshot — duplicate same-day invocation', () => {
       ],
     });
 
-    // Mock provider returning prices slightly different from prevSnap
-    const mockProvider: MarketDataProvider = {
-      getLatestPrices: vi.fn().mockResolvedValue(SAMPLE_START_PRICES),
-      getDailyBars: vi.fn().mockResolvedValue([]),
-      getDailyBarsBatch: vi.fn().mockResolvedValue({}),
-      getCryptoDailyCloseBatch: vi.fn().mockResolvedValue({}),
-    };
+    const mockProvider = makeHistoricalMockProvider({ '2026-07-29': SAMPLE_START_PRICES });
 
-    // Mock getEasternDateStr to return today = 2026-07-29 (same as prev snapshot)
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-29T21:00:00Z')); // 5 PM ET (after close)
+    const [snap] = await buildSnapshotsForDates(SAMPLE_CONFIG, mockProvider, prevSnap, ['2026-07-29']);
 
-    const snap = await buildMarketSnapshot(SAMPLE_CONFIG, mockProvider, prevSnap);
-
-    // Chart should still have exactly 2 points (start + today), not 3
+    // Chart should still have exactly 2 points (start + the re-run date), not 3
     expect(snap.chartData).toHaveLength(2);
     expect(snap.chartData[0].date).toBe('2026-07-24');
     expect(snap.chartData[1].date).toBe('2026-07-29');
-
-    vi.useRealTimers();
   });
 });
 
-describe('buildMarketSnapshot — new day appends chart point', () => {
-  it('appends a new point for a new trading date', async () => {
+describe('buildSnapshotsForDates — catch-up appends missing trading days chronologically', () => {
+  it('produces one snapshot per missing date, each extending the chart', async () => {
     const prevSnap = makeSnapshot({
       asOfMarketDate: '2026-07-28',
       chartData: [
@@ -189,45 +205,44 @@ describe('buildMarketSnapshot — new day appends chart point', () => {
       ],
     });
 
-    const mockProvider: MarketDataProvider = {
-      getLatestPrices: vi.fn().mockResolvedValue(SAMPLE_START_PRICES),
-      getDailyBars: vi.fn().mockResolvedValue([]),
-      getDailyBarsBatch: vi.fn().mockResolvedValue({}),
-      getCryptoDailyCloseBatch: vi.fn().mockResolvedValue({}),
-    };
+    const mockProvider = makeHistoricalMockProvider({
+      '2026-07-29': SAMPLE_START_PRICES,
+      '2026-07-30': SAMPLE_START_PRICES,
+    });
 
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-29T21:00:00Z')); // 5 PM ET on July 29
+    const snapshots = await buildSnapshotsForDates(
+      SAMPLE_CONFIG, mockProvider, prevSnap, ['2026-07-29', '2026-07-30'],
+    );
 
-    const snap = await buildMarketSnapshot(SAMPLE_CONFIG, mockProvider, prevSnap);
-
-    expect(snap.chartData).toHaveLength(3);
-    expect(snap.chartData[2].date).toBe('2026-07-29');
-    // getDailyBarsBatch should NOT have been called (we have prev chart data)
-    expect(mockProvider.getDailyBarsBatch).not.toHaveBeenCalled();
-
-    vi.useRealTimers();
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[0].asOfMarketDate).toBe('2026-07-29');
+    expect(snapshots[0].chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-28', '2026-07-29']);
+    expect(snapshots[1].asOfMarketDate).toBe('2026-07-30');
+    expect(snapshots[1].chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-28', '2026-07-29', '2026-07-30']);
+    // No date appears twice across the final chart
+    const uniqueDates = new Set(snapshots[1].chartData.map((p) => p.date));
+    expect(uniqueDates.size).toBe(snapshots[1].chartData.length);
   });
 });
 
-describe('buildMarketSnapshot — first run fetches full history', () => {
-  it('calls getDailyBarsBatch when no previous chart data', async () => {
-    const mockProvider: MarketDataProvider = {
-      getLatestPrices: vi.fn().mockResolvedValue(SAMPLE_START_PRICES),
-      getDailyBars: vi.fn().mockResolvedValue([]),
-      getDailyBarsBatch: vi.fn().mockResolvedValue({}),
-      getCryptoDailyCloseBatch: vi.fn().mockResolvedValue({}),
-    };
+describe('buildSnapshotsForDates — first run ever pins the start date to zero', () => {
+  it('builds full history from the contest start and fetches historical bars', async () => {
+    const mockProvider = makeHistoricalMockProvider({
+      '2026-07-24': SAMPLE_START_PRICES,
+      '2026-07-27': SAMPLE_START_PRICES,
+    });
 
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-29T21:00:00Z'));
+    const snapshots = await buildSnapshotsForDates(
+      SAMPLE_CONFIG, mockProvider, null, ['2026-07-24', '2026-07-27'],
+    );
 
-    await buildMarketSnapshot(SAMPLE_CONFIG, mockProvider, null);
-
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[0].chartData).toEqual([
+      { date: '2026-07-24', chatgpt: 0, claude: 0, gemini: 0, spy: 0 },
+    ]);
+    expect(snapshots[1].chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-27']);
     expect(mockProvider.getDailyBarsBatch).toHaveBeenCalled();
     expect(mockProvider.getCryptoDailyCloseBatch).toHaveBeenCalled();
-
-    vi.useRealTimers();
   });
 });
 
