@@ -153,24 +153,63 @@ export class TwelveDataProvider implements MarketDataProvider {
       `&interval=1day&start_date=${startDate}&end_date=${endDate}` +
       `&outputsize=5000&apikey=${this.apiKey}`;
 
-    const res = await fetchWithTimeout(url, {
-      next: { revalidate: 21600 },
-    } as RequestInit);
+    // Log the exact URL (API key redacted) so production logs show the full request.
+    const redactedUrl = url.replace(`apikey=${this.apiKey}`, 'apikey=[REDACTED]');
+    console.log(
+      `[twelve-data] getDailyBarsBatch: ${symbols.length} symbols [${symbols.join(', ')}] ` +
+      `${startDate}→${endDate}`,
+    );
+    console.log(`[twelve-data] GET ${redactedUrl}`);
 
-    if (res.status === 429) throw new Error('Twelve Data rate limit hit (history)');
-    if (!res.ok) throw new Error(`Twelve Data /time_series returned ${res.status}`);
+    // cache: 'no-store' bypasses the Next.js data cache so every invocation hits
+    // Twelve Data directly. A 6-hour cached error or stale empty response would
+    // otherwise cause all symbols to silently return empty bars across every retry.
+    const res = await fetchWithTimeout(url, { cache: 'no-store' });
 
-    // Log credit budget so we can diagnose rate-limit issues in production.
+    // Log rate-limit headers before reading the body so they appear even if parsing fails.
     const creditLimit     = res.headers.get('X-RateLimit-Limit-Minute');
     const creditRemaining = res.headers.get('X-RateLimit-Remaining-Minute');
     console.log(
-      `[twelve-data] getDailyBarsBatch(${symbols.length} symbols) HTTP ${res.status} — ` +
+      `[twelve-data] HTTP ${res.status} — ` +
       `credits: ${creditRemaining ?? '?'} remaining of ${creditLimit ?? '?'}/min`,
     );
 
-    const raw: unknown = await res.json();
+    // Read the body as text first so we can include it in any error message.
+    const bodyText = await res.text();
+
+    if (res.status === 429) {
+      console.error(`[twelve-data] rate-limit body: ${bodyText.slice(0, 500)}`);
+      throw new Error('Twelve Data rate limit hit (history)');
+    }
+    if (!res.ok) {
+      console.error(`[twelve-data] non-OK body (${res.status}): ${bodyText.slice(0, 500)}`);
+      throw new Error(
+        `Twelve Data /time_series returned HTTP ${res.status}: ${bodyText.slice(0, 300)}`,
+      );
+    }
+
+    let raw: unknown;
+    try {
+      raw = JSON.parse(bodyText);
+    } catch {
+      console.error(`[twelve-data] non-JSON body: ${bodyText.slice(0, 500)}`);
+      throw new Error(`Twelve Data /time_series: non-JSON response (HTTP ${res.status})`);
+    }
+
     if (typeof raw !== 'object' || raw === null) {
       throw new Error('Twelve Data /time_series: unexpected response shape');
+    }
+
+    // Twelve Data returns { "status": "error", "message": "...", "code": N } as HTTP 200
+    // for invalid API keys, exhausted quotas, and malformed requests.
+    // Without this check the batch parser sees batch['IREN'] === undefined for every symbol
+    // and silently returns empty bars, which destroys the error trail entirely.
+    const maybeTopErr = raw as { status?: string; message?: string; code?: number };
+    if (maybeTopErr.status === 'error') {
+      console.error(`[twelve-data] API-level error: ${bodyText.slice(0, 500)}`);
+      throw new Error(
+        `Twelve Data API error: ${maybeTopErr.message ?? 'unknown'} (code: ${maybeTopErr.code ?? 'n/a'})`,
+      );
     }
 
     const result: Record<string, DailyBar[]> = {};
@@ -178,29 +217,59 @@ export class TwelveDataProvider implements MarketDataProvider {
     if (symbols.length === 1) {
       const single = raw as { values?: Array<Record<string, string>>; status?: string; message?: string };
       if (single.status === 'error') {
-        console.warn(`Twelve Data: error for ${symbols[0]}: ${single.message}`);
-        result[symbols[0]] = [];
-        return result;
+        throw new Error(`Twelve Data error for ${symbols[0]}: ${single.message ?? 'no data'}`);
       }
-      result[symbols[0]] = normalizeBars(single.values ?? []);
+      const bars = normalizeBars(single.values ?? []);
+      if (bars.length === 0) {
+        console.warn(
+          `[twelve-data] ${symbols[0]}: status=ok but 0 bars for ${startDate}→${endDate} ` +
+          `(data not yet published?)`,
+        );
+      } else {
+        console.log(`[twelve-data] ${symbols[0]}: ${bars.length} bars`);
+      }
+      result[symbols[0]] = bars;
       return result;
     }
 
-    const batch = raw as Record<string, { values?: Array<Record<string, string>>; status?: string; message?: string }>;
+    // Batch path: collect all per-symbol errors before deciding to throw, so the
+    // log shows every failing symbol in one message rather than stopping at the first.
+    const batch = raw as Record<string, {
+      values?: Array<Record<string, string>>;
+      status?: string;
+      message?: string;
+    }>;
+    const batchErrors: string[] = [];
     for (const sym of symbols) {
       const entry = batch[sym];
       if (!entry || entry.status === 'error') {
+        const msg = entry?.message ?? 'no entry in batch response';
         console.error(
-          `[twelve-data] ${sym}: status=${entry?.status ?? 'missing'} ` +
-          `message="${entry?.message ?? 'no entry in batch response'}"`,
+          `[twelve-data] ${sym}: status=${entry?.status ?? 'missing'} message="${msg}"`,
         );
+        batchErrors.push(`${sym} (${msg})`);
         result[sym] = [];
         continue;
       }
       const bars = normalizeBars(entry.values ?? []);
-      console.log(`[twelve-data] ${sym}: ${bars.length} bars`);
+      if (bars.length === 0) {
+        console.warn(
+          `[twelve-data] ${sym}: status=ok but 0 bars for ${startDate}→${endDate} ` +
+          `(data not yet published?)`,
+        );
+      } else {
+        console.log(`[twelve-data] ${sym}: ${bars.length} bars`);
+      }
       result[sym] = bars;
     }
+
+    if (batchErrors.length > 0) {
+      throw new Error(
+        `Twelve Data batch failure: ${batchErrors.length}/${symbols.length} symbol(s) errored — ` +
+        batchErrors.join('; '),
+      );
+    }
+
     return result;
   }
 
