@@ -5,7 +5,7 @@ import { getContestConfig, getStartDateStr } from '@/lib/contest-config';
 import { isContestConfigured } from '@/lib/calculations';
 import { getLatestCompletedMarketDate, getMarketDaysBetween } from '@/lib/market-calendar';
 import { getLatestMarketSnapshot, saveMarketSnapshot } from '@/lib/snapshot-store';
-import { buildSnapshotsForDates, validateSnapshot, WAVE_SLEEP_MS } from '@/lib/snapshot-builder';
+import { buildSnapshotsForDates, validateSnapshot } from '@/lib/snapshot-builder';
 
 // In-process lock to prevent two concurrent requests on the same instance
 // from generating duplicate snapshots.
@@ -19,13 +19,12 @@ function isAuthorized(request: Request): boolean {
 }
 
 /**
- * Vercel Hobby plan allows only a single daily production cron invocation,
- * so this runs once at 22:00 UTC every day (see vercel.json) instead of the
- * old twice-daily weekday schedule. Because it may run less often than the
- * number of trading days that pass (deploy gaps, transient failures, etc.),
- * it always catches up: it compares the latest fully completed US trading
- * date against the newest stored snapshot and backfills every trading day
- * in between, in chronological order, using each day's official close.
+ * Refreshes the market snapshot for every trading day since the last stored one.
+ * Stocks (8 symbols) are fetched from Twelve Data; crypto (BTC/USD, ETH/USD, SOL/USD)
+ * from Coinbase Exchange public candles — a completely separate API with no shared
+ * rate limit. Both fetches run in parallel within a single invocation with no
+ * artificial delays. Because the cron may run less often than trading days pass
+ * (deploy gaps, failures), it always catches up in chronological order.
  */
 export async function GET(request: Request): Promise<NextResponse> {
   const startMs = Date.now();
@@ -101,9 +100,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
 
     const provider = await createProvider();
-    const snapshots = await buildSnapshotsForDates(config, provider, prevSnapshot, missingDates, {
-      waveSleepMs: WAVE_SLEEP_MS,
-    });
+    const snapshots = await buildSnapshotsForDates(config, provider, prevSnapshot, missingDates);
 
     const savedDates: string[] = [];
     for (const snapshot of snapshots) {

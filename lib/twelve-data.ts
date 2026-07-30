@@ -160,6 +160,14 @@ export class TwelveDataProvider implements MarketDataProvider {
     if (res.status === 429) throw new Error('Twelve Data rate limit hit (history)');
     if (!res.ok) throw new Error(`Twelve Data /time_series returned ${res.status}`);
 
+    // Log credit budget so we can diagnose rate-limit issues in production.
+    const creditLimit     = res.headers.get('X-RateLimit-Limit-Minute');
+    const creditRemaining = res.headers.get('X-RateLimit-Remaining-Minute');
+    console.log(
+      `[twelve-data] getDailyBarsBatch(${symbols.length} symbols) HTTP ${res.status} — ` +
+      `credits: ${creditRemaining ?? '?'} remaining of ${creditLimit ?? '?'}/min`,
+    );
+
     const raw: unknown = await res.json();
     if (typeof raw !== 'object' || raw === null) {
       throw new Error('Twelve Data /time_series: unexpected response shape');
@@ -182,11 +190,16 @@ export class TwelveDataProvider implements MarketDataProvider {
     for (const sym of symbols) {
       const entry = batch[sym];
       if (!entry || entry.status === 'error') {
-        console.warn(`Twelve Data: missing/error for ${sym}: ${entry?.message ?? 'no data'}`);
+        console.error(
+          `[twelve-data] ${sym}: status=${entry?.status ?? 'missing'} ` +
+          `message="${entry?.message ?? 'no entry in batch response'}"`,
+        );
         result[sym] = [];
         continue;
       }
-      result[sym] = normalizeBars(entry.values ?? []);
+      const bars = normalizeBars(entry.values ?? []);
+      console.log(`[twelve-data] ${sym}: ${bars.length} bars`);
+      result[sym] = bars;
     }
     return result;
   }

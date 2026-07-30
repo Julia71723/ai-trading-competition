@@ -12,6 +12,21 @@ import { SAMPLE_START_PRICES } from './fixtures/sample-prices';
 import type { ContestConfig, DailyBar } from '../lib/types';
 import type { MarketSnapshot } from '../lib/snapshot';
 import type { MarketDataProvider } from '../lib/provider';
+// Coinbase module is mocked so buildSnapshotsForDates never hits the network in tests.
+import { fetchCoinbaseDailyClose } from '../lib/coinbase';
+vi.mock('../lib/coinbase', () => ({ fetchCoinbaseDailyClose: vi.fn() }));
+
+const CRYPTO_PRICES = {
+  'BTC/USD': SAMPLE_START_PRICES['BTC/USD'],
+  'ETH/USD': SAMPLE_START_PRICES['ETH/USD'],
+  'SOL/USD': SAMPLE_START_PRICES['SOL/USD'],
+};
+
+// Reset all mocks and restore Coinbase default before each test.
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(fetchCoinbaseDailyClose).mockResolvedValue(CRYPTO_PRICES);
+});
 
 /**
  * Mock provider whose historical-bar methods return a flat close price
@@ -241,8 +256,11 @@ describe('buildSnapshotsForDates — first run ever pins the start date to zero'
       { date: '2026-07-24', chatgpt: 0, claude: 0, gemini: 0, spy: 0 },
     ]);
     expect(snapshots[1].chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-27']);
+    // Stocks come from Twelve Data provider
     expect(mockProvider.getDailyBarsBatch).toHaveBeenCalled();
-    expect(mockProvider.getCryptoDailyCloseBatch).toHaveBeenCalled();
+    // Crypto never touches Twelve Data — Coinbase handles it
+    expect(mockProvider.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalled();
   });
 });
 
@@ -414,11 +432,57 @@ describe('buildSnapshotsForDates — stateless across separate invocations', () 
     expect(snapB.asOfMarketDate).toBe('2026-07-30');
     // Chart grew from the Blob snapshot, not from any in-memory state left by invocation A.
     expect(snapB.chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-29', '2026-07-30']);
-    // Each provider was consulted exactly once — no cross-invocation sharing.
+    // Each stock provider was consulted exactly once — no cross-invocation sharing.
     expect(providerA.getDailyBarsBatch).toHaveBeenCalledTimes(1);
     expect(providerB.getDailyBarsBatch).toHaveBeenCalledTimes(1);
-    expect(providerA.getCryptoDailyCloseBatch).toHaveBeenCalledTimes(1);
-    expect(providerB.getCryptoDailyCloseBatch).toHaveBeenCalledTimes(1);
+    // Crypto never goes through either provider — it uses Coinbase independently.
+    expect(providerA.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
+    expect(providerB.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
+    // Coinbase was called once per date: Jul 24, Jul 29 (inv A) + Jul 30 (inv B) = 3
+    expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ── Crypto source isolation ───────────────────────────────────────────────────
+
+describe('buildSnapshotsForDates — crypto never calls Twelve Data', () => {
+  it('routes BTC/USD, ETH/USD, SOL/USD to Coinbase and never to the stock provider', async () => {
+    const provider = makeHistoricalMockProvider({
+      '2026-07-24': SAMPLE_START_PRICES,
+      '2026-07-29': SAMPLE_START_PRICES,
+    });
+
+    await buildSnapshotsForDates(SAMPLE_CONFIG, provider, null, ['2026-07-24', '2026-07-29']);
+
+    // Twelve Data provider must never receive crypto symbols
+    expect(provider.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
+    const stockCallArgs = (provider.getDailyBarsBatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string[];
+    expect(stockCallArgs).not.toContain('BTC/USD');
+    expect(stockCallArgs).not.toContain('ETH/USD');
+    expect(stockCallArgs).not.toContain('SOL/USD');
+
+    // Coinbase must have been called for each date with the crypto symbols
+    expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalledWith(
+      expect.arrayContaining(['BTC/USD', 'ETH/USD', 'SOL/USD']),
+      '2026-07-24',
+    );
+    expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalledWith(
+      expect.arrayContaining(['BTC/USD', 'ETH/USD', 'SOL/USD']),
+      '2026-07-29',
+    );
+    expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalledTimes(2);
+  });
+
+  it('resulting snapshot contains Coinbase-sourced crypto prices', async () => {
+    const coinbasePrices = { 'BTC/USD': 99_000, 'ETH/USD': 4_000, 'SOL/USD': 250 };
+    vi.mocked(fetchCoinbaseDailyClose).mockResolvedValue(coinbasePrices);
+
+    const provider = makeHistoricalMockProvider({ '2026-07-29': SAMPLE_START_PRICES });
+    const [snap] = await buildSnapshotsForDates(SAMPLE_CONFIG, provider, null, ['2026-07-29']);
+
+    expect(snap.prices['BTC/USD']).toBe(99_000);
+    expect(snap.prices['ETH/USD']).toBe(4_000);
+    expect(snap.prices['SOL/USD']).toBe(250);
   });
 });
 
