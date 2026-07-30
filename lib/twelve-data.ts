@@ -33,66 +33,19 @@ function normalizeBars(values: Array<Record<string, string>>): DailyBar[] {
 }
 
 /**
- * For a given ET calendar date, return the UTC milliseconds that represent 4:00 PM ET.
- * Accounts for EDT (UTC-4, summer) vs EST (UTC-5, winter).
+ * For single-date requests, verify that returned bars include the target date.
+ * Twelve Data may serve the previous day's close before the requested date's
+ * official EOD data has been published — those bars are discarded here so the
+ * snapshot validator catches the absence and the cron retries the next morning.
  */
-function get4PMETUtcMs(etDateStr: string): number {
-  const at20utc = new Date(`${etDateStr}T20:00:00Z`);
-  const etHour = parseInt(
-    new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York',
-      hour: 'numeric',
-      hourCycle: 'h23',
-    }).format(at20utc),
-    10,
+function filterByDate(bars: DailyBar[], targetDate: string, sym: string): DailyBar[] {
+  if (bars.length === 0) return bars;
+  if (bars.some((b) => b.date === targetDate)) return bars;
+  console.warn(
+    `[twelve-data] ${sym}: returned bar date "${bars[0].date}" ≠ ` +
+    `requested date "${targetDate}" — discarding (data not yet published?)`,
   );
-  // If 20:00 UTC = 16:00 ET, we're in EDT; otherwise EST → need 21:00 UTC
-  return etHour === 16 ? at20utc.getTime() : new Date(`${etDateStr}T21:00:00Z`).getTime();
-}
-
-/**
- * From raw hourly bar values (UTC datetimes for crypto), extract one DailyBar per
- * calendar day (ET), using the bar closest to 4:00 PM ET.
- */
-function extractDailyAtFourPMET(rawValues: Array<Record<string, string>>): DailyBar[] {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-
-  // Group bars by ET calendar date
-  const byDate = new Map<string, Array<{ utcMs: number; close: number }>>();
-  for (const v of rawValues) {
-    const close = parseFloat(v.close);
-    if (!isFinite(close) || close <= 0) continue;
-    const utcMs = new Date(v.datetime.replace(' ', 'T') + 'Z').getTime();
-    const parts = dtf.formatToParts(new Date(utcMs));
-    const year = parts.find((p) => p.type === 'year')?.value;
-    const month = parts.find((p) => p.type === 'month')?.value;
-    const day = parts.find((p) => p.type === 'day')?.value;
-    const etDate = `${year}-${month}-${day}`;
-    if (!byDate.has(etDate)) byDate.set(etDate, []);
-    byDate.get(etDate)!.push({ utcMs, close });
-  }
-
-  const result: DailyBar[] = [];
-  for (const [etDate, bars] of byDate.entries()) {
-    const target = get4PMETUtcMs(etDate);
-    let best: { utcMs: number; close: number } | null = null;
-    let bestDiff = Infinity;
-    for (const bar of bars) {
-      const diff = Math.abs(bar.utcMs - target);
-      if (diff < bestDiff) { bestDiff = diff; best = bar; }
-    }
-    // Accept bars within 90 minutes of target (1h bars land at :00 each hour)
-    if (best && bestDiff <= 90 * 60 * 1000) {
-      result.push({ date: etDate, open: best.close, high: best.close, low: best.close, close: best.close });
-    }
-  }
-
-  return result.sort((a, b) => a.date.localeCompare(b.date));
+  return [];
 }
 
 export class TwelveDataProvider implements MarketDataProvider {
@@ -148,16 +101,24 @@ export class TwelveDataProvider implements MarketDataProvider {
   ): Promise<Record<string, DailyBar[]>> {
     if (symbols.length === 0) return {};
 
+    // Use `date=` for exact single-day queries; `start_date`/`end_date` for ranges.
+    // Same-day start_date=end_date returns "No data is available on the specified dates"
+    // on the Twelve Data Basic plan — the `date=` parameter is the correct approach.
+    const isSingleDate = startDate === endDate;
+    const dateParams = isSingleDate
+      ? `&date=${startDate}`
+      : `&start_date=${startDate}&end_date=${endDate}&outputsize=5000`;
+
     const url =
       `${BASE}/time_series?symbol=${encodeSymbols(symbols)}` +
-      `&interval=1day&start_date=${startDate}&end_date=${endDate}` +
-      `&outputsize=5000&apikey=${this.apiKey}`;
+      `&interval=1day${dateParams}` +
+      `&apikey=${this.apiKey}`;
 
     // Log the exact URL (API key redacted) so production logs show the full request.
     const redactedUrl = url.replace(`apikey=${this.apiKey}`, 'apikey=[REDACTED]');
     console.log(
       `[twelve-data] getDailyBarsBatch: ${symbols.length} symbols [${symbols.join(', ')}] ` +
-      `${startDate}→${endDate}`,
+      (isSingleDate ? `date=${startDate}` : `${startDate}→${endDate}`),
     );
     console.log(`[twelve-data] GET ${redactedUrl}`);
 
@@ -219,14 +180,16 @@ export class TwelveDataProvider implements MarketDataProvider {
       if (single.status === 'error') {
         throw new Error(`Twelve Data error for ${symbols[0]}: ${single.message ?? 'no data'}`);
       }
-      const bars = normalizeBars(single.values ?? []);
+      let bars = normalizeBars(single.values ?? []);
       if (bars.length === 0) {
         console.warn(
-          `[twelve-data] ${symbols[0]}: status=ok but 0 bars for ${startDate}→${endDate} ` +
-          `(data not yet published?)`,
+          `[twelve-data] ${symbols[0]}: status=ok but 0 bars ` +
+          (isSingleDate ? `for date ${startDate}` : `for ${startDate}→${endDate}`) +
+          ` (data not yet published?)`,
         );
       } else {
-        console.log(`[twelve-data] ${symbols[0]}: ${bars.length} bars`);
+        console.log(`[twelve-data] ${symbols[0]}: ${bars.length} bar(s)`);
+        if (isSingleDate) bars = filterByDate(bars, startDate, symbols[0]);
       }
       result[symbols[0]] = bars;
       return result;
@@ -251,14 +214,16 @@ export class TwelveDataProvider implements MarketDataProvider {
         result[sym] = [];
         continue;
       }
-      const bars = normalizeBars(entry.values ?? []);
+      let bars = normalizeBars(entry.values ?? []);
       if (bars.length === 0) {
         console.warn(
-          `[twelve-data] ${sym}: status=ok but 0 bars for ${startDate}→${endDate} ` +
-          `(data not yet published?)`,
+          `[twelve-data] ${sym}: status=ok but 0 bars ` +
+          (isSingleDate ? `for date ${startDate}` : `for ${startDate}→${endDate}`) +
+          ` (data not yet published?)`,
         );
       } else {
-        console.log(`[twelve-data] ${sym}: ${bars.length} bars`);
+        console.log(`[twelve-data] ${sym}: ${bars.length} bar(s)`);
+        if (isSingleDate) bars = filterByDate(bars, startDate, sym);
       }
       result[sym] = bars;
     }
@@ -270,56 +235,6 @@ export class TwelveDataProvider implements MarketDataProvider {
       );
     }
 
-    return result;
-  }
-
-  async getCryptoDailyCloseBatch(
-    symbols: string[],
-    startDate: string,
-    endDate: string,
-  ): Promise<Record<string, DailyBar[]>> {
-    if (symbols.length === 0) return {};
-
-    const url =
-      `${BASE}/time_series?symbol=${encodeSymbols(symbols)}` +
-      `&interval=1h&start_date=${startDate}&end_date=${endDate}` +
-      `&outputsize=5000&apikey=${this.apiKey}`;
-
-    const res = await fetchWithTimeout(url, {
-      next: { revalidate: 21600 },
-    } as RequestInit);
-
-    if (res.status === 429) throw new Error('Twelve Data rate limit hit (crypto hourly)');
-    if (!res.ok) throw new Error(`Twelve Data /time_series (1h) returned ${res.status}`);
-
-    const raw: unknown = await res.json();
-    if (typeof raw !== 'object' || raw === null) {
-      throw new Error('Twelve Data /time_series (1h): unexpected response shape');
-    }
-
-    const result: Record<string, DailyBar[]> = {};
-
-    if (symbols.length === 1) {
-      const single = raw as { values?: Array<Record<string, string>>; status?: string; message?: string };
-      if (single.status === 'error') {
-        console.warn(`Twelve Data (hourly): error for ${symbols[0]}: ${single.message}`);
-        result[symbols[0]] = [];
-        return result;
-      }
-      result[symbols[0]] = extractDailyAtFourPMET(single.values ?? []);
-      return result;
-    }
-
-    const batch = raw as Record<string, { values?: Array<Record<string, string>>; status?: string; message?: string }>;
-    for (const sym of symbols) {
-      const entry = batch[sym];
-      if (!entry || entry.status === 'error') {
-        console.warn(`Twelve Data (hourly): missing/error for ${sym}: ${entry?.message ?? 'no data'}`);
-        result[sym] = [];
-        continue;
-      }
-      result[sym] = extractDailyAtFourPMET(entry.values ?? []);
-    }
     return result;
   }
 

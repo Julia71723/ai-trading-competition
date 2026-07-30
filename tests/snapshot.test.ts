@@ -52,7 +52,6 @@ function makeHistoricalMockProvider(
     getLatestPrices: vi.fn().mockResolvedValue(SAMPLE_START_PRICES),
     getDailyBars: vi.fn().mockResolvedValue([]),
     getDailyBarsBatch: vi.fn(async (symbols: string[]) => barsFor(symbols)),
-    getCryptoDailyCloseBatch: vi.fn(async (symbols: string[]) => barsFor(symbols)),
   };
 }
 
@@ -258,8 +257,7 @@ describe('buildSnapshotsForDates — first run ever pins the start date to zero'
     expect(snapshots[1].chartData.map((p) => p.date)).toEqual(['2026-07-24', '2026-07-27']);
     // Stocks come from Twelve Data provider
     expect(mockProvider.getDailyBarsBatch).toHaveBeenCalled();
-    // Crypto never touches Twelve Data — Coinbase handles it
-    expect(mockProvider.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
+    // Crypto is routed to Coinbase — never to the stock provider
     expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalled();
   });
 });
@@ -352,9 +350,10 @@ describe('isMarketDay', () => {
 // ── getLatestCompletedMarketDate ──────────────────────────────────────────────
 
 describe('getLatestCompletedMarketDate', () => {
-  it('returns today when it is a market day and after 4:20 PM ET (EDT)', () => {
-    // Wednesday July 29 at 5 PM EDT = 21:00 UTC
-    expect(getLatestCompletedMarketDate(makeDate('2026-07-29T21:00:00Z'))).toBe('2026-07-29');
+  it('returns the previous trading day even after 4:20 PM ET (EOD data not yet published)', () => {
+    // Wednesday July 29 at 5 PM EDT — market closed, but Twelve Data Basic EOD
+    // data is not available until after midnight ET on the following day
+    expect(getLatestCompletedMarketDate(makeDate('2026-07-29T21:00:00Z'))).toBe('2026-07-28');
   });
 
   it('returns yesterday when today is a market day but before 4:20 PM ET', () => {
@@ -377,6 +376,27 @@ describe('getLatestCompletedMarketDate', () => {
     // Tuesday Sep 8, 2026 at 10 AM ET = 14:00 UTC (before close)
     // Sep 7 = Labor Day (holiday), Sep 6 = Sunday, Sep 5 = Saturday → Sep 4 = Friday
     expect(getLatestCompletedMarketDate(makeDate('2026-09-08T14:00:00Z'))).toBe('2026-09-04');
+  });
+});
+
+// ── Next-morning scheduling ───────────────────────────────────────────────────
+
+describe('next-morning scheduling — cron at 11:00 UTC', () => {
+  it('returns the preceding trading day when the cron fires the morning after', () => {
+    // Cron fires Thursday July 30 at 11:00 UTC = 07:00 EDT
+    // Previous trading day (July 29) EOD data is now available
+    expect(getLatestCompletedMarketDate(makeDate('2026-07-30T11:00:00Z'))).toBe('2026-07-29');
+  });
+
+  it('skips the weekend and returns Friday when cron fires on Monday morning', () => {
+    // Cron fires Monday August 3 at 11:00 UTC = 07:00 EDT
+    // Friday July 31 is the most recent market day — Saturday/Sunday are skipped
+    expect(getLatestCompletedMarketDate(makeDate('2026-08-03T11:00:00Z'))).toBe('2026-07-31');
+  });
+
+  it('skips holidays and returns the last trading day before a long weekend', () => {
+    // Cron fires Tuesday Sep 8 at 11:00 UTC — Sep 7 is Labor Day, Sep 6/5 weekend
+    expect(getLatestCompletedMarketDate(makeDate('2026-09-08T11:00:00Z'))).toBe('2026-09-04');
   });
 });
 
@@ -435,9 +455,6 @@ describe('buildSnapshotsForDates — stateless across separate invocations', () 
     // Each stock provider was consulted exactly once — no cross-invocation sharing.
     expect(providerA.getDailyBarsBatch).toHaveBeenCalledTimes(1);
     expect(providerB.getDailyBarsBatch).toHaveBeenCalledTimes(1);
-    // Crypto never goes through either provider — it uses Coinbase independently.
-    expect(providerA.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
-    expect(providerB.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
     // Coinbase was called once per date: Jul 24, Jul 29 (inv A) + Jul 30 (inv B) = 3
     expect(vi.mocked(fetchCoinbaseDailyClose)).toHaveBeenCalledTimes(3);
   });
@@ -455,7 +472,6 @@ describe('buildSnapshotsForDates — crypto never calls Twelve Data', () => {
     await buildSnapshotsForDates(SAMPLE_CONFIG, provider, null, ['2026-07-24', '2026-07-29']);
 
     // Twelve Data provider must never receive crypto symbols
-    expect(provider.getCryptoDailyCloseBatch).not.toHaveBeenCalled();
     const stockCallArgs = (provider.getDailyBarsBatch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string[];
     expect(stockCallArgs).not.toContain('BTC/USD');
     expect(stockCallArgs).not.toContain('ETH/USD');
