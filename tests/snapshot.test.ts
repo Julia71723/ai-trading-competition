@@ -35,6 +35,7 @@ beforeEach(() => {
  */
 function makeHistoricalMockProvider(
   datesWithPrices: Record<string, Record<string, number>>,
+  livePrices: Record<string, number> = SAMPLE_START_PRICES,
 ): MarketDataProvider {
   const barsFor = (symbols: string[]): Record<string, DailyBar[]> => {
     const result: Record<string, DailyBar[]> = {};
@@ -49,7 +50,7 @@ function makeHistoricalMockProvider(
   };
 
   return {
-    getLatestPrices: vi.fn().mockResolvedValue(SAMPLE_START_PRICES),
+    getLatestPrices: vi.fn().mockResolvedValue(livePrices),
     getDailyBars: vi.fn().mockResolvedValue([]),
     getDailyBarsBatch: vi.fn(async (symbols: string[]) => barsFor(symbols)),
   };
@@ -239,6 +240,38 @@ describe('buildSnapshotsForDates — catch-up appends missing trading days chron
   });
 });
 
+describe('buildSnapshotsForDates — same-day date uses a live quote, not EOD bars', () => {
+  it('fetches the last (today) date via getLatestPrices, not getDailyBarsBatch', async () => {
+    const livePrices = { ...SAMPLE_START_PRICES, IREN: 12.34 };
+    const mockProvider = makeHistoricalMockProvider({}, livePrices);
+    const now = makeDate('2026-07-29T21:30:00Z'); // 5:30 PM EDT — after close
+
+    const [snap] = await buildSnapshotsForDates(SAMPLE_CONFIG, mockProvider, null, ['2026-07-29'], now);
+
+    expect(mockProvider.getLatestPrices).toHaveBeenCalledWith(expect.arrayContaining(['IREN', 'SPY']));
+    expect(mockProvider.getDailyBarsBatch).not.toHaveBeenCalled();
+    expect(snap.prices['IREN']).toBe(12.34);
+  });
+
+  it('splits a mixed catch-up run: past dates via EOD bars, today via live quote', async () => {
+    const livePrices = { ...SAMPLE_START_PRICES, SPY: 777 };
+    const mockProvider = makeHistoricalMockProvider({ '2026-07-28': SAMPLE_START_PRICES }, livePrices);
+    const now = makeDate('2026-07-29T21:30:00Z');
+
+    const snapshots = await buildSnapshotsForDates(
+      SAMPLE_CONFIG, mockProvider, null, ['2026-07-28', '2026-07-29'], now,
+    );
+
+    // Historical date: fetched via the range endpoint, both dates passed as the range
+    expect(mockProvider.getDailyBarsBatch).toHaveBeenCalledWith(
+      expect.any(Array), '2026-07-28', '2026-07-28',
+    );
+    expect(mockProvider.getLatestPrices).toHaveBeenCalledTimes(1);
+    expect(snapshots[0].prices['SPY']).toBe(SAMPLE_START_PRICES['SPY']); // July 28: EOD bar
+    expect(snapshots[1].prices['SPY']).toBe(777); // July 29 (today): live quote
+  });
+});
+
 describe('buildSnapshotsForDates — first run ever pins the start date to zero', () => {
   it('builds full history from the contest start and fetches historical bars', async () => {
     const mockProvider = makeHistoricalMockProvider({
@@ -350,10 +383,9 @@ describe('isMarketDay', () => {
 // ── getLatestCompletedMarketDate ──────────────────────────────────────────────
 
 describe('getLatestCompletedMarketDate', () => {
-  it('returns the previous trading day even after 4:20 PM ET (EOD data not yet published)', () => {
-    // Wednesday July 29 at 5 PM EDT — market closed, but Twelve Data Basic EOD
-    // data is not available until after midnight ET on the following day
-    expect(getLatestCompletedMarketDate(makeDate('2026-07-29T21:00:00Z'))).toBe('2026-07-28');
+  it('returns today when it is a market day and after 4:20 PM ET (EDT)', () => {
+    // Wednesday July 29 at 5 PM EDT = 21:00 UTC — market closed, live quote captured
+    expect(getLatestCompletedMarketDate(makeDate('2026-07-29T21:00:00Z'))).toBe('2026-07-29');
   });
 
   it('returns yesterday when today is a market day but before 4:20 PM ET', () => {
@@ -379,24 +411,21 @@ describe('getLatestCompletedMarketDate', () => {
   });
 });
 
-// ── Next-morning scheduling ───────────────────────────────────────────────────
+// ── Fixed single-cron schedule (21:30 UTC) clears the close in both DST states ─
 
-describe('next-morning scheduling — cron at 11:00 UTC', () => {
-  it('returns the preceding trading day when the cron fires the morning after', () => {
-    // Cron fires Thursday July 30 at 11:00 UTC = 07:00 EDT
-    // Previous trading day (July 29) EOD data is now available
-    expect(getLatestCompletedMarketDate(makeDate('2026-07-30T11:00:00Z'))).toBe('2026-07-29');
+describe('single fixed-UTC schedule (21:30 UTC per vercel.json) always clears the close', () => {
+  it('EDT: 21:30 UTC = 5:30 PM ET — after close, captures today', () => {
+    // Wednesday July 29 is in EDT (summer)
+    expect(getLatestCompletedMarketDate(makeDate('2026-07-29T21:30:00Z'))).toBe('2026-07-29');
   });
 
-  it('skips the weekend and returns Friday when cron fires on Monday morning', () => {
-    // Cron fires Monday August 3 at 11:00 UTC = 07:00 EDT
-    // Friday July 31 is the most recent market day — Saturday/Sunday are skipped
-    expect(getLatestCompletedMarketDate(makeDate('2026-08-03T11:00:00Z'))).toBe('2026-07-31');
+  it('EST: 21:30 UTC = 4:30 PM ET — after close, captures today', () => {
+    // Tuesday December 1 is in EST (winter)
+    expect(getLatestCompletedMarketDate(makeDate('2026-12-01T21:30:00Z'))).toBe('2026-12-01');
   });
 
-  it('skips holidays and returns the last trading day before a long weekend', () => {
-    // Cron fires Tuesday Sep 8 at 11:00 UTC — Sep 7 is Labor Day, Sep 6/5 weekend
-    expect(getLatestCompletedMarketDate(makeDate('2026-09-08T11:00:00Z'))).toBe('2026-09-04');
+  it('skips the weekend and returns Friday when the cron fires on Saturday', () => {
+    expect(getLatestCompletedMarketDate(makeDate('2026-08-01T21:30:00Z'))).toBe('2026-07-31');
   });
 });
 

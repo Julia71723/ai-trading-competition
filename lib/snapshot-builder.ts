@@ -1,11 +1,12 @@
 import type { MarketSnapshot } from './snapshot';
-import type { ContestConfig, HistoryPoint } from './types';
+import type { ContestConfig, HistoryPoint, DailyBar } from './types';
 import type { MarketDataProvider } from './provider';
 import { ALL_SYMBOLS, PORTFOLIOS, BENCHMARK } from './portfolios';
 import { computeAllPortfolioStates, computeBenchmarkState } from './calculations';
 import { buildHistorySeries, forwardFillPrices, barsToDateMap } from './history';
 import { getStartDateStr } from './contest-config';
 import { fetchCoinbaseDailyClose } from './coinbase';
+import { getEasternDateStr } from './market-calendar';
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -84,10 +85,20 @@ function computeChartPoint(
 // ── Catch-up builder ─────────────────────────────────────────────────────────
 
 /**
- * Build one MarketSnapshot per date in `dates`, using each date's official
- * regular-session close (1-day bars for stocks, the bar nearest 4:00 PM ET
- * for crypto) rather than a live quote. This lets the caller "catch up" on
- * any number of missed trading days in a single call.
+ * Build one MarketSnapshot per date in `dates`.
+ *
+ * Crypto (BTC/USD, ETH/USD, SOL/USD) always comes from Coinbase's public
+ * candles for the bar nearest 4:00 PM ET on that date — Coinbase has no
+ * next-day publish lag, so this works identically for today or any past date.
+ *
+ * Stocks are sourced differently depending on the date:
+ *  - If `dates` includes today (ET, per `now`), today's price is a *live quote*
+ *    (Twelve Data's real-time /price endpoint), captured once the close guard
+ *    in getLatestCompletedMarketDate has cleared. Twelve Data's Basic plan does
+ *    not publish the official EOD daily bar for a session until the following
+ *    morning, so the settled aggregate cannot be used same-day.
+ *  - Every other (past) date uses the settled EOD daily bar (1-day interval),
+ *    which is reliably available for any date strictly before today.
  *
  * `dates` must be in chronological order and contain only market days
  * (weekends/holidays already excluded by the caller). If `dates` contains
@@ -103,23 +114,33 @@ export async function buildSnapshotsForDates(
   provider: MarketDataProvider,
   prevSnapshot: MarketSnapshot | null,
   dates: string[],
+  now: Date = new Date(),
 ): Promise<MarketSnapshot[]> {
   if (dates.length === 0) return [];
 
   const startDate = getStartDateStr(config);
-  const rangeStart = dates[0];
-  const rangeEnd = dates[dates.length - 1];
+  const todayET = getEasternDateStr(now);
+  const isTodayIncluded = dates.includes(todayET);
+  const historicalDates = dates.filter((d) => d !== todayET);
 
   console.log(
-    `[snapshot-builder] fetching ${rangeStart}→${rangeEnd} (${dates.length} date(s)) — ` +
-    `stocks via Twelve Data, crypto via Coinbase (parallel, independent APIs)`,
+    `[snapshot-builder] building ${dates.length} date(s): ${dates.join(', ')} — ` +
+    `crypto via Coinbase; stocks via ` +
+    [
+      historicalDates.length > 0 ? `Twelve Data EOD (${historicalDates.join(', ')})` : null,
+      isTodayIncluded ? `Twelve Data live quote (${todayET})` : null,
+    ].filter(Boolean).join(' + '),
   );
 
-  // Stocks: Twelve Data daily bars (8 symbols, well within the 8-credit/min limit).
-  // Crypto: Coinbase Exchange public candles per date (no API key, no shared rate limit).
-  // Both fetches run in parallel — they hit different upstream services.
-  const [stockBarsMap, cryptoByDate] = await Promise.all([
-    provider.getDailyBarsBatch(STOCK_SYMBOLS, rangeStart, rangeEnd),
+  // All three fetches run in parallel — they hit independent upstream services
+  // (or, for historical/live, independent Twelve Data endpoints).
+  const [historicalBarsMap, liveStockPrices, cryptoByDate] = await Promise.all([
+    historicalDates.length > 0
+      ? provider.getDailyBarsBatch(STOCK_SYMBOLS, historicalDates[0], historicalDates[historicalDates.length - 1])
+      : Promise.resolve({} as Record<string, DailyBar[]>),
+    isTodayIncluded
+      ? provider.getLatestPrices(STOCK_SYMBOLS)
+      : Promise.resolve({} as Record<string, number>),
     (async () => {
       const byDate: Record<string, Record<string, number>> = {};
       await Promise.all(
@@ -131,22 +152,39 @@ export async function buildSnapshotsForDates(
     })(),
   ]);
 
-  // Log Twelve Data results
-  const stockSucceeded = STOCK_SYMBOLS.filter((s) => stockBarsMap[s]?.length > 0);
-  const stockFailed    = STOCK_SYMBOLS.filter((s) => !stockBarsMap[s]?.length);
-  console.log(
-    `[snapshot-builder] Twelve Data: requested=[${STOCK_SYMBOLS.join(', ')}]` +
-    ` succeeded=[${stockSucceeded.join(', ')}]` +
-    (stockFailed.length ? ` MISSING=[${stockFailed.join(', ')}]` : ''),
-  );
+  if (historicalDates.length > 0) {
+    const succeeded = STOCK_SYMBOLS.filter((s) => historicalBarsMap[s]?.length > 0);
+    const failed    = STOCK_SYMBOLS.filter((s) => !historicalBarsMap[s]?.length);
+    console.log(
+      `[snapshot-builder] Twelve Data EOD: requested=[${STOCK_SYMBOLS.join(', ')}]` +
+      ` succeeded=[${succeeded.join(', ')}]` +
+      (failed.length ? ` MISSING=[${failed.join(', ')}]` : ''),
+    );
+  }
+  if (isTodayIncluded) {
+    const resolved = STOCK_SYMBOLS.filter((s) => s in liveStockPrices);
+    const missing   = STOCK_SYMBOLS.filter((s) => !(s in liveStockPrices));
+    console.log(
+      `[snapshot-builder] Twelve Data live quote (${todayET}): requested=[${STOCK_SYMBOLS.join(', ')}]` +
+      ` resolved=[${resolved.join(', ')}]` +
+      (missing.length ? ` MISSING=[${missing.join(', ')}]` : ''),
+    );
+  }
 
-  // Build rawPrices: stocks from Twelve Data bars, crypto from Coinbase closes
+  // Build rawPrices: historical stocks from EOD bars, today's stocks from the
+  // live quote, crypto from Coinbase closes.
   const rawPrices: Record<string, Record<string, number>> = {};
-  for (const [sym, bars] of Object.entries(stockBarsMap)) {
+  for (const [sym, bars] of Object.entries(historicalBarsMap)) {
     rawPrices[sym] = barsToDateMap(bars);
   }
+  if (isTodayIncluded) {
+    for (const [sym, price] of Object.entries(liveStockPrices)) {
+      if (!rawPrices[sym]) rawPrices[sym] = {};
+      rawPrices[sym][todayET] = price;
+    }
+  }
   for (const sym of CRYPTO_SYMBOLS) {
-    rawPrices[sym] = {};
+    rawPrices[sym] = rawPrices[sym] ?? {};
     for (const date of dates) {
       const price = cryptoByDate[date]?.[sym];
       if (price !== undefined) rawPrices[sym][date] = price;

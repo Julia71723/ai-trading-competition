@@ -20,11 +20,12 @@ function isAuthorized(request: Request): boolean {
 
 /**
  * Refreshes the market snapshot for every trading day since the last stored one.
- * Stocks (8 symbols) are fetched from Twelve Data; crypto (BTC/USD, ETH/USD, SOL/USD)
- * from Coinbase Exchange public candles — a completely separate API with no shared
- * rate limit. Both fetches run in parallel within a single invocation with no
- * artificial delays. Because the cron may run less often than trading days pass
- * (deploy gaps, failures), it always catches up in chronological order.
+ * Runs once daily (see vercel.json), shortly after the 4:20 PM ET close guard
+ * clears — today's stock prices come from a live quote (the settled EOD bar
+ * isn't published by Twelve Data until the next morning), crypto always from
+ * Coinbase Exchange public candles. Because the cron may run less often than
+ * trading days pass (deploy gaps, failures), it always catches up in
+ * chronological order, using settled EOD data for any earlier missed day.
  */
 export async function GET(request: Request): Promise<NextResponse> {
   const startMs = Date.now();
@@ -100,7 +101,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
 
     const provider = await createProvider();
-    const snapshots = await buildSnapshotsForDates(config, provider, prevSnapshot, missingDates);
+    const snapshots = await buildSnapshotsForDates(config, provider, prevSnapshot, missingDates, now);
 
     const savedDates: string[] = [];
     for (const snapshot of snapshots) {

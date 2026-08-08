@@ -64,25 +64,30 @@ export function isMarketDay(now: Date = new Date()): boolean {
 }
 
 /**
- * Returns the YYYY-MM-DD of the most recent trading day whose official EOD
- * data is available. Twelve Data Basic plan publishes US EOD data the morning
- * after the trading session (available by midnight ET on the following calendar
- * day). The daily cron fires at 11:00 UTC (6–7 AM ET), which is always past
- * midnight ET, so the correct answer is always "yesterday" — the most recent
- * market day strictly before today in ET.
+ * Returns the YYYY-MM-DD of the most recent completed market session
+ * (i.e. a market day whose 4:20 PM ET close has already passed).
+ *
+ * Same-day close prices are captured via a live quote (not the official EOD
+ * aggregate, which Twelve Data's Basic plan does not publish until the next
+ * morning), so today counts as soon as the close guard clears — see
+ * buildSnapshotsForDates in snapshot-builder.ts.
  *
  * Returns null if no market day can be found within 14 calendar days.
  */
 export function getLatestCompletedMarketDate(now: Date = new Date()): string | null {
-  const todayET = getEasternDateStr(now);
-
-  // Anchor the cursor at noon UTC on today-ET so the ET date conversion is
-  // unambiguous in both EDT and EST (noon UTC is always mid-morning ET).
-  const cursor = new Date(`${todayET}T12:00:00Z`);
+  const candidate = new Date(now.getTime());
 
   for (let i = 0; i < 14; i++) {
-    cursor.setUTCDate(cursor.getUTCDate() - 1);
-    if (isMarketDay(cursor)) return getEasternDateStr(cursor);
+    if (isMarketDay(candidate)) {
+      if (i === 0) {
+        // Today: only counts if close has passed
+        if (isAfterMarketClose(now)) return getEasternDateStr(now);
+      } else {
+        // Past market day — close has definitely passed
+        return getEasternDateStr(candidate);
+      }
+    }
+    candidate.setUTCDate(candidate.getUTCDate() - 1);
   }
   return null;
 }
